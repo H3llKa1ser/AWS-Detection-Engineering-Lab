@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Convert Sigma rules for AWS CloudTrail into this lab's two detection targets:
+Convert Sigma rules for AWS CloudTrail into this lab's three detection targets:
 
   * CloudWatch Logs metric filters (real-time alarms, merged into the
-    detection catalogue), and
+    detection catalogue),
+  * CloudWatch Logs Insights queries (log alarms that run the query on a
+    schedule over the CloudTrail log group, plus saved queries), and
   * Athena hunts (saved queries over the CloudTrail table, schedulable like
     every other hunt).
 
@@ -417,6 +419,76 @@ def case_sensitive_caveat(ir):
     return walk(ir)
 
 
+# --- CloudWatch Logs Insights backend ------------------------------------------------------
+# Runs on the CloudTrail log group, so it is near-real-time like the metric
+# filters, but its language can express Sigma exactly: case-insensitive regex,
+# ispresent(), isIpInSubnet() for both IP families. Every comparison and function
+# used returns a boolean (documented), so `not` needs no special handling, unlike
+# SQL's NULL. Two behaviours are not documented and are handled defensively
+# (marked PROBE in the live conformance tier): JSON booleans are matched as the
+# number 1/0 or the string "true"/"false", and a JSON null is treated as absent.
+
+INSIGHTS_MAX_QUERY = 10000      # logs:StartQuery / CreateScheduledQuery queryString limit (API model)
+RE2_UNSUPPORTED = re.compile(r"\(\?[=!<]|\\[1-9]|\(\?P=")    # lookaround and backreferences
+
+
+def insights_field(field):
+    if field.split(".")[0] in ARRAY_FIELDS:
+        raise Unsupported(f"{field} is inside an array; Sigma cannot say which element")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*", field):
+        raise Unsupported(f"field not expressible in Logs Insights: {field}")
+    return field
+
+
+def re2_literal(text):
+    """Escape a literal for RE2 inside /.../ (escape every non-alphanumeric)."""
+    if any(ord(c) < 32 for c in text):
+        raise Unsupported("control characters in values are not supported")
+    return "".join(c if c.isalnum() or c == "_" else "\\" + c for c in text)
+
+
+def insights_expr(e):
+    op = e[0]
+    if op in ("and", "or"):
+        return "(" + f" {op} ".join(insights_expr(x) for x in e[1]) + ")"
+    if op == "not":
+        return f"(not {insights_expr(e[1])})"
+    _, field, kind, value, cased = e
+    f = insights_field(field)
+    if kind == "null" or (kind == "exists" and value is False):
+        return f"(not ispresent({f}))"
+    if kind == "exists":
+        return f"ispresent({f})"
+    if kind == "bool":
+        return f'(ispresent({f}) and ({f} = {1 if value else 0} or {f} = "{str(value).lower()}"))'
+    if kind == "int":
+        return f"(ispresent({f}) and {f} = {value})"
+    if kind == "cidr":
+        return f'(ispresent({f}) and isIpInSubnet({f}, "{value}"))'
+    if kind == "re":
+        rx, flags = value
+        if RE2_UNSUPPORTED.search(rx):
+            raise Unsupported("|re uses lookaround or backreferences, which RE2 (Logs Insights) does not support")
+        if "/" in rx.replace("\\/", ""):
+            rx = rx.replace("/", "\\/")
+        return f"(ispresent({f}) and {f} like /{'(?i)' if 'i' in flags else ''}{rx}/)"
+    body = "".join({"star": ".*", "q": "."}.get(t[0]) or re2_literal(t[1]) for t in value)
+    return f"(ispresent({f}) and {f} like /{'(?s)' if cased else '(?is)'}^{body}$/)"
+
+
+INSIGHTS_FIELDS = ("@timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, "
+                   "userIdentity.arn, userIdentity.principalId")
+
+
+def to_insights(ir):
+    cond = insights_expr(ir)
+    saved = f"fields {INSIGHTS_FIELDS}\n| filter {cond}\n| sort @timestamp desc\n| limit 500"
+    alarm = f"fields @timestamp, @message\n| filter {cond}"
+    if len(saved) > INSIGHTS_MAX_QUERY:
+        raise Unsupported(f"query is {len(saved)} characters; Logs Insights allows {INSIGHTS_MAX_QUERY}")
+    return {"filter": cond, "saved_query": saved, "alarm_query": alarm}
+
+
 # --- Rule-level conversion and outputs -------------------------------------------------
 def slug_for(path):
     return "sigma_" + re.sub(r"[^a-z0-9]+", "_", path.stem.lower()).strip("_")
@@ -470,7 +542,7 @@ def convert_rule(path):
     except Unsupported as e:
         out["error"] = str(e)
         return out
-    for target, fn in (("cloudwatch", to_cloudwatch), ("athena", athena_expr)):
+    for target, fn in (("cloudwatch", to_cloudwatch), ("athena", athena_expr), ("insights", to_insights)):
         try:
             out[target] = fn(ir)
         except Unsupported as e:
@@ -492,6 +564,10 @@ def render_outputs(results):
                            "attack": r["attack"], "threshold": 1, "pattern": r["cloudwatch"]}
                for r in results if "cloudwatch" in r}
     files["metric_filters.json"] = json.dumps(filters, indent=2, sort_keys=True) + "\n"
+    insights = {r["slug"]: {"title": r["title"], "level": r["level"], "attack": r["attack"],
+                            "saved_query": r["insights"]["saved_query"], "alarm_query": r["insights"]["alarm_query"]}
+                for r in results if "insights" in r}
+    files["insights_queries.json"] = json.dumps(insights, indent=2, sort_keys=True) + "\n"
     for r in results:
         if "hunt_sql" in r:
             files[f"hunts/{r['slug']}.sql"] = r["hunt_sql"]
@@ -508,17 +584,22 @@ def render_outputs(results):
              f"{caveat} CloudWatch conversion(s) compare letters case-insensitively in Sigma and therefore assume "
              "CloudTrail's own casing (exact for service-generated fields such as eventSource and eventName).", "",
              f"{len(results)} rules: {sum('cloudwatch' in r for r in results)} converted to CloudWatch metric filters, "
+             f"{sum('insights' in r for r in results)} to Logs Insights log alarms and saved queries, "
              f"{sum('athena' in r for r in results)} to Athena hunts, {sum('error' in r for r in results)} not converted.", "",
-             "| Rule | Level | ATT&CK | CloudWatch metric filter | Athena hunt |",
-             "|------|-------|--------|--------------------------|-------------|"]
+             "Logs Insights follows Sigma semantics like Athena (case-insensitive regex, ispresent, isIpInSubnet). "
+             "JSON booleans are matched as 1/0 or \"true\"/\"false\" and a JSON null counts as absent, because the "
+             "documentation does not say how Logs Insights represents them; the live conformance tier checks this.", "",
+             "| Rule | Level | ATT&CK | CloudWatch metric filter | Logs Insights log alarm | Athena hunt |",
+             "|------|-------|--------|--------------------------|-------------------------|-------------|"]
     for r in results:
         if "error" in r:
             lines.append(f"| `{r['file']}` | {r.get('level', '')} | {r.get('attack', '')} "
-                         f"| not converted: {cell(r['error'])} | not converted |")
+                         f"| not converted: {cell(r['error'])} | not converted | not converted |")
             continue
         cw = f"yes (`{r['slug']}`)" if "cloudwatch" in r else f"no: {cell(r['cloudwatch_skipped'])}"
         at = f"yes (`{r['slug']}`)" if "athena" in r else f"no: {cell(r['athena_skipped'])}"
-        lines.append(f"| {cell(r['title'])} (`{r['file']}`) | {r['level']} | {r['attack']} | {cw} | {at} |")
+        li = f"yes (`insights-{r['slug']}`)" if "insights" in r else f"no: {cell(r['insights_skipped'])}"
+        lines.append(f"| {cell(r['title'])} (`{r['file']}`) | {r['level']} | {r['attack']} | {cw} | {li} | {at} |")
     files["REPORT.md"] = "\n".join(lines) + "\n"
     return files
 
@@ -560,7 +641,7 @@ def main(argv=None):
         (out / f).write_text(content)
     for r in results:
         status = "error: " + r["error"] if "error" in r else ", ".join(
-            t for t in ("cloudwatch", "athena") if t in r) or "nothing"
+            t for t in ("cloudwatch", "insights", "athena") if t in r) or "nothing"
         print(f"{r['slug']:55} {status}")
     return 0
 
