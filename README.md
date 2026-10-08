@@ -456,6 +456,30 @@ Run the schedule now, with its exact input:
 $(terraform output -raw run_scheduled_hunts_now)
 ```
 
+## Live tests in a sandbox account
+
+Everything above is tested offline against models (DuckDB for Athena, a model of
+the documented CloudWatch semantics). `.github/workflows/live.yml` checks those
+models against the real services and the deployed stack against real activity,
+in a dedicated sandbox account, on demand and weekly, behind an approval-gated
+GitHub environment:
+
+- **Conformance** (no deployment, minutes): every built-in and Sigma metric
+  filter through the real CloudWatch `TestMetricFilter` API, and the IPv4/IPv6
+  SQL through real Athena, compared with the offline expectations and models.
+- **End to end** (apply, trigger, assert, destroy): every saved query runs in
+  Athena, retro and scheduled hunts complete, safe triggers raise their alarms
+  through SNS, hunts find the triggered activity in S3, and the Sigma hunts match
+  the reference implementation on synthetic CloudTrail files.
+
+Credentials come from GitHub OIDC (no stored keys) for a role with guardrail
+denies; every run uses its own prefix and state, destroys in an `always()` step,
+and a daily janitor removes anything a crashed run left. Setup, safety design
+and how to read results: [docs/live-testing.md](docs/live-testing.md). The live
+tiers have been verified offline (API calls validated against the AWS API
+models, query builders run in DuckDB, workflow safety properties asserted) but
+not yet run against AWS by the author.
+
 ## Prerequisites
 
 - Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
@@ -582,7 +606,9 @@ removes them even with objects inside. (Remove that in any real deployment.)
 ├── tests/scheduled/       # data-flow tests for the scheduled-hunts state machine (no AWS)
 ├── tests/intel/           # curation rules for intel/, merge mirror, feed importer tests
 ├── tests/sigma/           # Sigma converter: three-way differential tests
-├── .github/workflows/     # CI: every offline test, Sigma freshness, Terraform fmt/validate
+├── .github/workflows/     # CI: offline tests (tests.yml), live tiers (live.yml), janitor (live-janitor.yml)
+├── ci/                    # bootstrap/ (sandbox OIDC role, state, budget), e2e.tfvars, render-catalogue/
+├── tests/live/            # live conformance and end-to-end harness, janitor, offline tests of the harness
 ├── intel/                 # curated threat indicators (CSV) and the curation rules
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
@@ -599,7 +625,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow, DNS and CloudTrail, with retro-hunts on change (25 tested hunts in total)
 - [x] IPv6 support for flow hunts and IP/CIDR indicators (canonical address keys; VPC-aware internal ranges)
 - [x] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts (9 lab rules, coverage report, three-way differential tests)
-- [ ] Run the offline test suites against a live sandbox account in CI (apply, trigger, assert alarms and hunt results, destroy)
+- [x] Run the offline test suites against a live sandbox account in CI (conformance against real CloudWatch and Athena; apply, trigger, assert alarms and hunt results, destroy)
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

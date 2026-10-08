@@ -132,7 +132,10 @@ def ref_eval(e, event):
 
 # --- Model of CloudWatch JSON filter patterns (documented semantics) -----------------------
 
-CWL_TOKEN = re.compile(r'\s*(\{|\}|\(|\)|&&|\|\||!=|=|"(?:[^"\\]|\\.)*"|\$\.[A-Za-z0-9_.-]+|-?\d+|[A-Z]+)')
+# Tokens: punctuation, quoted strings, selectors, numbers, and bare words (keywords
+# such as IS / NOT EXISTS, and unquoted values like the CIS patterns' kms.amazonaws.com).
+CWL_TOKEN = re.compile(r'\s*(\{|\}|\(|\)|&&|\|\||!=|=|"(?:[^"\\]|\\.)*"|\$\.[A-Za-z0-9_.-]+'
+                       r'|-?\d+(?![A-Za-z0-9_.*:/-])|[A-Za-z0-9_*][A-Za-z0-9_.*:/-]*)')
 
 
 def cwl_parse(pattern):
@@ -162,7 +165,11 @@ def cwl_parse(pattern):
         op = take()
         if op in ("=", "!="):
             val = take()
-            val = json.loads(val) if val.startswith('"') else int(val)
+            if val.startswith('"'):
+                val = json.loads(val)
+            elif re.fullmatch(r"-?\d+", val):
+                val = int(val)                 # unquoted number
+            # otherwise an unquoted string (as in the CIS patterns)
             return ("cmp", sel[2:], op, val)
         if op == "IS":
             return ("is", sel[2:], take())
@@ -307,6 +314,19 @@ def evaluate(conv, events):
     return ref, ath, cw
 
 
+def case_events(cases):
+    """(changes, expected[, cloudwatch_expected]) cases -> (events, expected, cloudwatch_expected)."""
+    events, want, want_cw = [], [], []
+    for i, case in enumerate(cases):
+        ev = base_event(i)
+        for f, v in case[0].items():
+            set_path(ev, f, v)
+        events.append(ev)
+        want.append(case[1])
+        want_cw.append(case[2] if len(case) > 2 else case[1])
+    return events, want, want_cw
+
+
 def check_expectations(conv, cases):
     """cases: (changes, expected) or (changes, expected, cloudwatch_expected) where
     CloudWatch differs by design (case sensitivity)."""
@@ -328,61 +348,61 @@ def check_expectations(conv, cases):
 
 # --- Hand-written expectations for every lab rule ------------------------------------------------
 
+LAB_EXPECTATIONS = {
+    "sigma_guardduty_detector_disabled": [
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "DeleteDetector"}, True),
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": False}, True),
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": True}, False),
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector"}, False),
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "CreateDetector"}, False)],
+    "sigma_s3_public_access_block_removed": [
+        ({"eventSource": "s3.amazonaws.com", "eventName": "DeleteBucketPublicAccessBlock"}, True),
+        ({"eventSource": "s3-control.amazonaws.com", "eventName": "DeleteAccountPublicAccessBlock"}, True),
+        ({"eventSource": "s3.amazonaws.com", "eventName": "PutBucketPublicAccessBlock"}, False),
+        ({"eventSource": "s3.amazonaws.com", "eventName": "DeleteBucketPolicy"}, False)],
+    "sigma_iam_root_access_key_created": [
+        ({"eventSource": "iam.amazonaws.com", "eventName": "CreateAccessKey", "userIdentity.type": "Root"}, True),
+        ({"eventSource": "iam.amazonaws.com", "eventName": "CreateAccessKey", "userIdentity.type": "IAMUser"}, False)],
+    "sigma_ec2_user_data_modified": [
+        ({"eventSource": "ec2.amazonaws.com", "eventName": "ModifyInstanceAttribute",
+          "requestParameters.userData": "<sensitiveDataRemoved>"}, True),
+        ({"eventSource": "ec2.amazonaws.com", "eventName": "ModifyInstanceAttribute",
+          "requestParameters.instanceType": {"value": "t3.large"}}, False)],
+    "sigma_lambda_function_url_public": [
+        ({"eventSource": "lambda.amazonaws.com", "eventName": "CreateFunctionUrlConfig20211031",
+          "requestParameters.authType": "NONE"}, True),
+        ({"eventSource": "lambda.amazonaws.com", "eventName": "UpdateFunctionUrlConfig20211031",
+          "requestParameters.authType": "NONE"}, True),
+        ({"eventSource": "lambda.amazonaws.com", "eventName": "CreateFunctionUrlConfig20211031",
+          "requestParameters.authType": "AWS_IAM"}, False)],
+    "sigma_ssm_command_by_human": [
+        ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand"}, True),          # invokedBy absent
+        ({"eventSource": "ssm.amazonaws.com", "eventName": "StartSession", "userIdentity.invokedBy": None}, True),
+        ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand",
+          "userIdentity.invokedBy": "ssm.amazonaws.com"}, False),
+        ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand",
+          "userIdentity.invokedBy": "evil.example"}, True)],
+    "sigma_secretsmanager_resource_policy_changed": [
+        ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "PutResourcePolicy"}, True),
+        ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "PutResourcePolicy",
+          "errorCode": "AccessDenied"}, False),
+        ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "GetSecretValue"}, False)],
+    "sigma_organizations_leave": [
+        ({"eventSource": "organizations.amazonaws.com", "eventName": "LeaveOrganization"}, True),
+        ({"eventSource": "organizations.amazonaws.com", "eventName": "ListAccounts"}, False)],
+    "sigma_console_login_outside_known_ranges": [
+        ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "203.0.113.9"}, True),
+        ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "192.0.2.5"}, False),
+        ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "2001:db8::1"}, False),
+        ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "2001:db9::1"}, True),
+        ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Failure", "sourceIPAddress": "203.0.113.9"}, False)],
+}
+
+
 def test_lab_rules_hand_written_expectations():
     rules = lab_rules()
-    absent = MISSING
-    expectations = {
-        "sigma_guardduty_detector_disabled": [
-            ({"eventSource": "guardduty.amazonaws.com", "eventName": "DeleteDetector"}, True),
-            ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": False}, True),
-            ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": True}, False),
-            ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector"}, False),
-            ({"eventSource": "guardduty.amazonaws.com", "eventName": "CreateDetector"}, False)],
-        "sigma_s3_public_access_block_removed": [
-            ({"eventSource": "s3.amazonaws.com", "eventName": "DeleteBucketPublicAccessBlock"}, True),
-            ({"eventSource": "s3-control.amazonaws.com", "eventName": "DeleteAccountPublicAccessBlock"}, True),
-            ({"eventSource": "s3.amazonaws.com", "eventName": "PutBucketPublicAccessBlock"}, False),
-            ({"eventSource": "s3.amazonaws.com", "eventName": "DeleteBucketPolicy"}, False)],
-        "sigma_iam_root_access_key_created": [
-            ({"eventSource": "iam.amazonaws.com", "eventName": "CreateAccessKey", "userIdentity.type": "Root"}, True),
-            ({"eventSource": "iam.amazonaws.com", "eventName": "CreateAccessKey", "userIdentity.type": "IAMUser"}, False)],
-        "sigma_ec2_user_data_modified": [
-            ({"eventSource": "ec2.amazonaws.com", "eventName": "ModifyInstanceAttribute",
-              "requestParameters.userData": "<sensitiveDataRemoved>"}, True),
-            ({"eventSource": "ec2.amazonaws.com", "eventName": "ModifyInstanceAttribute",
-              "requestParameters.instanceType": {"value": "t3.large"}}, False)],
-        "sigma_lambda_function_url_public": [
-            ({"eventSource": "lambda.amazonaws.com", "eventName": "CreateFunctionUrlConfig20211031",
-              "requestParameters.authType": "NONE"}, True),
-            ({"eventSource": "lambda.amazonaws.com", "eventName": "UpdateFunctionUrlConfig20211031",
-              "requestParameters.authType": "NONE"}, True),
-            ({"eventSource": "lambda.amazonaws.com", "eventName": "CreateFunctionUrlConfig20211031",
-              "requestParameters.authType": "AWS_IAM"}, False)],
-        "sigma_ssm_command_by_human": [
-            ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand"}, True),          # invokedBy absent
-            ({"eventSource": "ssm.amazonaws.com", "eventName": "StartSession", "userIdentity.invokedBy": None}, True),
-            ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand",
-              "userIdentity.invokedBy": "ssm.amazonaws.com"}, False),
-            ({"eventSource": "ssm.amazonaws.com", "eventName": "SendCommand",
-              "userIdentity.invokedBy": "evil.example"}, True)],
-        "sigma_secretsmanager_resource_policy_changed": [
-            ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "PutResourcePolicy"}, True),
-            ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "PutResourcePolicy",
-              "errorCode": "AccessDenied"}, False),
-            ({"eventSource": "secretsmanager.amazonaws.com", "eventName": "GetSecretValue"}, False)],
-        "sigma_organizations_leave": [
-            ({"eventSource": "organizations.amazonaws.com", "eventName": "LeaveOrganization"}, True),
-            ({"eventSource": "organizations.amazonaws.com", "eventName": "ListAccounts"}, False)],
-        "sigma_console_login_outside_known_ranges": [
-            ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "203.0.113.9"}, True),
-            ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "192.0.2.5"}, False),
-            ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "2001:db8::1"}, False),
-            ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Success", "sourceIPAddress": "2001:db9::1"}, True),
-            ({"eventName": "ConsoleLogin", "responseElements.ConsoleLogin": "Failure", "sourceIPAddress": "203.0.113.9"}, False)],
-    }
-    assert set(expectations) == set(rules), f"lab rules without expectations: {set(rules) - set(expectations)}"
-    _ = absent
-    for slug, cases in expectations.items():
+    assert set(LAB_EXPECTATIONS) == set(rules), f"lab rules without expectations: {set(rules) - set(LAB_EXPECTATIONS)}"
+    for slug, cases in LAB_EXPECTATIONS.items():
         check_expectations(rules[slug], cases)
 
 
@@ -569,43 +589,45 @@ def test_targets_reported_for_fixtures():
         assert got == targets, (name, got, conv.get("cloudwatch_skipped"), conv.get("athena_skipped"))
 
 
+FIXTURE_EXPECTATIONS = {
+    "fx_all_modifier_and_contains": [
+        ({"userAgent": "aws-cli/2 Linux/5", "eventName": "PutBucketPolicy"}, True),
+        ({"userAgent": "aws-cli/2 Darwin", "eventName": "PutBucketPolicy"}, False),      # |all: both needed
+        ({"userAgent": "Linux boto3", "eventName": "PutBucketPolicy"}, False),
+        ({"userAgent": "aws-cli/2 Linux/5", "eventName": "ListBuckets"}, False)],
+    "fx_all_of_them_and_cased": [
+        ({"eventSource": "iam.amazonaws.com", "eventName": "CreateUser"}, True),          # _ignored excluded
+        ({"eventSource": "iam.amazonaws.com", "eventName": "createuser"}, False),         # |cased
+        ({"eventSource": "IAM.amazonaws.com", "eventName": "CreateUser"}, True, False)],  # not cased; CloudWatch is
+    "fx_nested_logic_ints_null": [
+        ({"eventName": "RunInstances", "errorCode": "AccessDenied"}, True),
+        ({"eventName": "RunInstances"}, False),                                           # errorCode null
+        ({"eventName": "Other", "requestParameters.maxCount": 5, "errorCode": "X"}, True),
+        ({"eventName": "Other", "requestParameters.maxCount": 6, "errorCode": "X"}, False),
+        ({"eventName": "RunInstances", "errorCode": "X", "userIdentity.type": "Root"}, False)],
+    "fx_exists_and_escape": [
+        ({"requestParameters.note": "it's *literal"}, True),
+        ({"requestParameters.note": "it's Xliteral"}, False),                             # \* is not a wildcard
+        ({"requestParameters.note": "it's *literal",
+          "userIdentity.sessionContext": {"sessionIssuer": {"userName": "role"}}}, False)],
+    "fx_negated_group_underscore": [
+        ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "ListUsers"}, True),
+        ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3Acli/1", "eventName": "ListUsers"}, False),
+        ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "CreateUser"}, False),
+        ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "ListUsers",
+          "userIdentity.type": "Root"}, False)],
+    "fx_question_mark_and_regex": [
+        ({"eventName": "DeleteTrail"}, True), ({"eventName": "DeleteXrail"}, True),
+        ({"eventName": "DeleteTTrail"}, False), ({"eventName": "STOPLOGGING"}, True),
+        ({"eventName": "StopLoggingNow"}, False),
+        ({"errorMessage": "what?"}, True), ({"errorMessage": "whatX"}, False)],         # \\? is a literal ?
+}
+
+
 def test_fixture_rules_hand_written_expectations():
     """Parser-level semantics. Differential testing cannot see parser bugs (all three
     implementations share the parsed rule), so these are written out by hand."""
-    expectations = {
-        "fx_all_modifier_and_contains": [
-            ({"userAgent": "aws-cli/2 Linux/5", "eventName": "PutBucketPolicy"}, True),
-            ({"userAgent": "aws-cli/2 Darwin", "eventName": "PutBucketPolicy"}, False),      # |all: both needed
-            ({"userAgent": "Linux boto3", "eventName": "PutBucketPolicy"}, False),
-            ({"userAgent": "aws-cli/2 Linux/5", "eventName": "ListBuckets"}, False)],
-        "fx_all_of_them_and_cased": [
-            ({"eventSource": "iam.amazonaws.com", "eventName": "CreateUser"}, True),          # _ignored excluded
-            ({"eventSource": "iam.amazonaws.com", "eventName": "createuser"}, False),         # |cased
-            ({"eventSource": "IAM.amazonaws.com", "eventName": "CreateUser"}, True, False)],  # not cased; CloudWatch is
-        "fx_nested_logic_ints_null": [
-            ({"eventName": "RunInstances", "errorCode": "AccessDenied"}, True),
-            ({"eventName": "RunInstances"}, False),                                           # errorCode null
-            ({"eventName": "Other", "requestParameters.maxCount": 5, "errorCode": "X"}, True),
-            ({"eventName": "Other", "requestParameters.maxCount": 6, "errorCode": "X"}, False),
-            ({"eventName": "RunInstances", "errorCode": "X", "userIdentity.type": "Root"}, False)],
-        "fx_exists_and_escape": [
-            ({"requestParameters.note": "it's *literal"}, True),
-            ({"requestParameters.note": "it's Xliteral"}, False),                             # \* is not a wildcard
-            ({"requestParameters.note": "it's *literal",
-              "userIdentity.sessionContext": {"sessionIssuer": {"userName": "role"}}}, False)],
-        "fx_negated_group_underscore": [
-            ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "ListUsers"}, True),
-            ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3Acli/1", "eventName": "ListUsers"}, False),
-            ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "CreateUser"}, False),
-            ({"eventSource": "iam.amazonaws.com", "userAgent": "boto3_cli/1", "eventName": "ListUsers",
-              "userIdentity.type": "Root"}, False)],
-        "fx_question_mark_and_regex": [
-            ({"eventName": "DeleteTrail"}, True), ({"eventName": "DeleteXrail"}, True),
-            ({"eventName": "DeleteTTrail"}, False), ({"eventName": "STOPLOGGING"}, True),
-            ({"eventName": "StopLoggingNow"}, False),
-            ({"errorMessage": "what?"}, True), ({"errorMessage": "whatX"}, False)],         # \\? is a literal ?
-    }
-    for name, cases in expectations.items():
+    for name, cases in FIXTURE_EXPECTATIONS.items():
         check_expectations(fixture(name), cases)
 
 

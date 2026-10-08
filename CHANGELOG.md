@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.11.0: Live tiers in a sandbox account
+
+### Added
+- `.github/workflows/live.yml`: on demand and weekly, behind the `sandbox`
+  environment, after the offline suite passes.
+  - **Conformance** (`tests/live/test_conformance.py`): all 26 built-in metric
+    filters against hand-written samples, and every Sigma metric filter against
+    the CloudWatch model, through the real `TestMetricFilter` API; the IP key
+    and CIDR SQL through real Athena against Python's `ipaddress`.
+  - **End to end** (`tests/live/test_e2e.py`): apply with `ci/e2e.tfvars` and a
+    per-run prefix and state; every saved query executes; retro and scheduled
+    hunts complete without FAILED alerts; safe triggers raise six alarms via
+    SNS; hunts 05, 23 and the Sigma SSM hunt find the triggered activity; the
+    Sigma hunts match the reference implementation on synthetic CloudTrail
+    files; destroy always.
+- `.github/workflows/live-janitor.yml` and `tests/live/janitor.py`: destroy
+  stacks whose state outlived its run, sweep test activity outside Terraform.
+- `ci/bootstrap/`: GitHub OIDC provider, CI role trusted only by this
+  repository's `sandbox` environment, guardrail denies, versioned state bucket,
+  CI Athena workgroup, monthly budget alert.
+- `ci/render-catalogue/`: renders the detection catalogue's patterns with a
+  Terraform plan that needs no AWS access.
+- `tests/live/catalogue_samples.py`: positive and negative samples for all 26
+  built-in detections, with `PROBE` cases for undocumented CloudWatch behaviour.
+- `tests/live/test_harness_offline.py` (in the offline CI suite): query
+  builders in DuckDB, catalogue samples vs the model, botocore validation of
+  every API call, helpers, and the workflows' safety properties.
+- `docs/live-testing.md`. Output `scheduled_hunts_state_machine_arn`.
+
+### Changed
+- The CloudWatch model in `tests/sigma/test_sigma.py` accepts unquoted values
+  (as in AWS's CIS patterns); the Sigma expectation tables are module-level so
+  the live tier reuses them.
+- `tests.yml` is reusable (`workflow_call`) as the live gate and also runs the
+  live harness's offline tests.
+
+### Not yet done
+- The live tiers have not been run against AWS by the author.
+
 ## 0.10.0: Sigma detection-as-code, CI
 
 ### Added

@@ -128,3 +128,8 @@ output "sigma" {
     hunts          = sort([for f in fileset("${local.sigma_dir}/hunts", "*.sql") : trimsuffix(f, ".sql")])
   } : null
 }
+
+output "scheduled_hunts_state_machine_arn" {
+  description = "State machine that runs scheduled hunts and retro-hunts (null when disabled)."
+  value       = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].state_machine_arn : null
+}
