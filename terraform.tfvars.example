@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and edit.
+
+aws_region  = "eu-west-1"
+name_prefix = "detlab"
+
+# Get paged. You must confirm the subscription email AWS sends you.
+alert_email = "you@example.com"
+
+# Forward GuardDuty medium and above.
+min_guardduty_severity = 4
+
+# Toggle layers while you learn / to keep spend down.
+enable_config              = true
+enable_guardduty           = true
+enable_securityhub         = true
+kms_encrypt_logs           = true
+
+# Opt-in: lets a Lambda revoke offending security-group rules automatically.
+enable_response_automation = false
