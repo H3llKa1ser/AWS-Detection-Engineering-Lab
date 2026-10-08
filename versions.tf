@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.9.0" # cross-variable validation rules (e.g. dns_firewall_block_override_domain)
 
   required_providers {
     aws = {
@@ -13,6 +13,10 @@ terraform {
     external = {
       source  = "hashicorp/external"
       version = "~> 2.3"
+    }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "~> 1.0" # CloudWatch log alarms (not yet in hashicorp/aws)
     }
   }
 }

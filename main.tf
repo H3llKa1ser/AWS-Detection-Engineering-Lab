@@ -78,6 +78,26 @@ locals {
   # metric filters for the detection catalogue and Athena hunts.
   sigma_dir            = "${path.root}/${var.sigma_generated_dir}"
   sigma_metric_filters = var.enable_sigma ? jsondecode(file("${local.sigma_dir}/metric_filters.json")) : {}
+  sigma_insights       = var.enable_sigma ? jsondecode(file("${local.sigma_dir}/insights_queries.json")) : {}
+}
+
+# Sigma rules as Logs Insights saved queries and log alarms over the CloudTrail
+# log group: the second real-time path, with Sigma's own semantics.
+module "sigma_insights" {
+  source = "./modules/sigma-insights"
+  count  = var.enable_sigma ? 1 : 0
+
+  name_prefix      = var.name_prefix
+  account_id       = local.account_id
+  partition        = local.partition
+  region           = local.region
+  log_group_name   = module.logging.cloudwatch_log_group_name
+  kms_key_arn      = module.logging.kms_key_arn
+  alert_topic_arn  = module.alerting.alert_topic_arn
+  rules            = local.sigma_insights
+  enable_alarms    = var.enable_sigma_log_alarms
+  schedule_minutes = var.sigma_log_alarm_schedule_minutes
+  lookback_minutes = var.sigma_log_alarm_lookback_minutes
 }
 
 locals {

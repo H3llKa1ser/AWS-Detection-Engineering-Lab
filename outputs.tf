@@ -125,6 +125,8 @@ output "sigma" {
   description = "Sigma rules deployed as CloudWatch metric filters and as Athena hunts (null when disabled)."
   value = var.enable_sigma ? {
     metric_filters = sort(keys(local.sigma_metric_filters))
+    log_alarms     = length(module.sigma_insights) > 0 ? module.sigma_insights[0].log_alarms : []
+    saved_queries  = length(module.sigma_insights) > 0 ? module.sigma_insights[0].saved_queries : []
     hunts          = sort([for f in fileset("${local.sigma_dir}/hunts", "*.sql") : trimsuffix(f, ".sql")])
   } : null
 }

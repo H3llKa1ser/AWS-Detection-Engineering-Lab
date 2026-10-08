@@ -28,7 +28,7 @@ architecture and infrastructure-as-code in one repo.
 | **Threat intelligence** | Curated IP/CIDR/domain indicators in git (`intel/`), validated, merged to a versioned S3 object and Athena table | Known-bad infrastructure matched against flows, DNS and CloudTrail, with automatic retro-hunts when indicators change |
 | **Threat hunting** | Glue tables over CloudTrail, flow, DNS logs and indicators (partition projection), Athena workgroup, 25 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-source joins |
 | **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch Recommended hunts for what is deployed (10-16) run daily over the last 24h; alerts only on findings or failures, each finding once |
-| **Sigma detection-as-code** | Sigma rules in `sigma/rules/` converted to metric filters and Athena hunts, with a coverage report | Write a detection once, run it in real time and over history; anything a target cannot express is reported, never approximated |
+| **Sigma detection-as-code** | Sigma rules in `sigma/rules/` converted to metric filters, Logs Insights log alarms and Athena hunts, with a coverage report | Write a detection once, run it in real time and over history; anything a target cannot express is reported, never approximated |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -220,9 +220,11 @@ before any rule uses it. Without the AWS CLI (e.g. in CI), pass the IDs in
 
 [Sigma](https://sigmahq.io/) is the vendor-neutral format detection engineers
 share rules in. `scripts/sigma_convert.py` turns CloudTrail Sigma rules in
-`sigma/rules/` into both of this lab's targets: **CloudWatch metric filters**
-(merged into the detection catalogue, with alarms) and **Athena hunts** (saved
-and schedulable as `sigma_<rule>`). Generated files live in `sigma/generated/`
+`sigma/rules/` into three targets: **CloudWatch metric filters** (merged into the
+detection catalogue, with alarms), **CloudWatch Logs Insights log alarms**
+(CloudWatch runs the rule's query on the CloudTrail log group every 5 minutes
+and alarms on a match; plus saved queries) and **Athena hunts** (saved and
+schedulable as `sigma_<rule>`). Generated files live in `sigma/generated/`
 and are committed; CI fails if they are stale. Details and the supported subset:
 [sigma/README.md](sigma/README.md).
 
@@ -232,8 +234,17 @@ data modified, an unauthenticated Lambda function URL, SSM commands or sessions
 started by a person, a Secrets Manager policy changed, an account leaving its
 organization, and console sign-ins from outside known ranges.
 [sigma/generated/REPORT.md](sigma/generated/REPORT.md) shows each one's targets:
-eight convert to both; the CIDR rule is Athena-only, because CloudWatch filters
-cannot match CIDRs.
+eight convert to all three; the CIDR rule converts to Logs Insights and Athena,
+because metric filters cannot match CIDRs.
+
+**Two real-time paths, on purpose.** Metric filters are cheap and immediate but
+case-sensitive, cannot test that a field exists, and cannot match IP ranges.
+Logs Insights log alarms run over the same log group a few minutes later with
+Sigma's own semantics (case-insensitive regex, `ispresent()`, `isIpInSubnet()`
+for IPv4 and IPv6), so every rule has an exact real-time path, and rules that
+convert to both get two independent ones. Log alarms are an AWS feature from
+November 2025 that `hashicorp/aws` does not have yet, so they use the
+`hashicorp/awscc` provider (`enable_sigma_log_alarms` turns them off).
 
 **Faithful, or not at all.** Sigma, Athena and CloudWatch disagree in places.
 Sigma is case-insensitive and treats a condition on an absent field as false
@@ -245,9 +256,10 @@ for CloudWatch's `!=`), and skips a target, with the reason, when it cannot.
 The one deliberate exception is CloudWatch's case sensitivity, which the report
 states for every rule it affects.
 
-**Tested three ways.** `tests/sigma/test_sigma.py` runs every rule through a
-Python reference implementation of Sigma, the generated SQL (in DuckDB) and a
-model of the documented CloudWatch filter semantics, on hand-written cases and
+**Tested four ways.** `tests/sigma/test_sigma.py` runs every rule through a
+Python reference implementation of Sigma, the generated SQL (in DuckDB), a
+model of the documented CloudWatch filter semantics and a model of Logs
+Insights, on hand-written cases and
 hundreds of randomised events per rule, and requires all three to agree. That
 found a real bug during development: a negated `|cidr` dropped events whose
 source "IP" was not an IP (`AWS Internal`, a service name), because the SQL
@@ -465,8 +477,9 @@ in a dedicated sandbox account, on demand and weekly, behind an approval-gated
 GitHub environment:
 
 - **Conformance** (no deployment, minutes): every built-in and Sigma metric
-  filter through the real CloudWatch `TestMetricFilter` API, and the IPv4/IPv6
-  SQL through real Athena, compared with the offline expectations and models.
+  filter through the real CloudWatch `TestMetricFilter` API, every Sigma Logs
+  Insights query on real Logs Insights, and the IPv4/IPv6 SQL through real
+  Athena, compared with the offline expectations and models.
 - **End to end** (apply, trigger, assert, destroy): every saved query runs in
   Athena, retro and scheduled hunts complete, safe triggers raise their alarms
   through SNS, hunts find the triggered activity in S3, and the Sigma hunts match
@@ -482,7 +495,7 @@ not yet run against AWS by the author.
 
 ## Prerequisites
 
-- Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
+- Terraform >= 1.9 (validation rules that compare variables need it), with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x) and `hashicorp/awscc` 1.x (Sigma log alarms)
 - AWS CLI v2 and bash, authenticated to a **non-production / sandbox account** you can afford to deploy managed services in (the CLI is also used at plan time to resolve DNS Firewall managed-list IDs)
 - The deploying identity also needs `logs:CreateLogDelivery`, `firehose:TagDeliveryStream` and, the first time, `iam:CreateServiceLinkedRole` for `AWSServiceRoleForLogDelivery`, which Resolver uses to deliver into Firehose
 - Permissions to create IAM, CloudTrail, Config, GuardDuty, Security Hub, SNS, EventBridge, Lambda, KMS and S3 resources
@@ -597,6 +610,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
 │   ├── threat-intel/      # indicator validation + merge, versioned S3 object, Athena table
+│   ├── sigma-insights/    # Sigma rules as Logs Insights saved queries and log alarms (awscc)
 ├── sigma/                 # Sigma rules (rules/) and converter output (generated/: metric filters, hunts, REPORT.md)
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql), shared SQL (sql/)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
@@ -626,7 +640,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] IPv6 support for flow hunts and IP/CIDR indicators (canonical address keys; VPC-aware internal ranges)
 - [x] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts (9 lab rules, coverage report, three-way differential tests)
 - [x] Run the offline test suites against a live sandbox account in CI (conformance against real CloudWatch and Athena; apply, trigger, assert alarms and hunt results, destroy)
-- [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
+- [x] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path (log alarms with Sigma's exact semantics, saved queries)
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)
 

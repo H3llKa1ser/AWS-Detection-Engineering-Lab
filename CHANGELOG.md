@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.12.0: Sigma to CloudWatch Logs Insights (second real-time path)
+
+### Added
+- Third backend in `scripts/sigma_convert.py`: Logs Insights filters with Sigma's
+  semantics (case-insensitive anchored RE2 regexes, `ispresent()`,
+  `isIpInSubnet()` for IPv4 and IPv6). All nine lab rules convert, including the
+  CIDR rule metric filters cannot express. `sigma/generated/insights_queries.json`;
+  the report gains a column.
+- `modules/sigma-insights`: per rule, a saved query and a CloudWatch log alarm
+  (AWS, November 2025) via `hashicorp/awscc`, since `hashicorp/aws` has no
+  resource for it yet. Variables `enable_sigma_log_alarms`,
+  `sigma_log_alarm_schedule_minutes`, `sigma_log_alarm_lookback_minutes`.
+- Tests: a model of Logs Insights in `tests/sigma/test_sigma.py` that must agree
+  with the reference on every event, case-flipped ones included; mutation-checked.
+  Live conformance runs every Sigma query on real Logs Insights and probes
+  JSON boolean/null behaviour; a fake service in the offline harness tests
+  proves that check fails when the probes would. The e2e tier expects the SSM
+  trigger's log alarm; the janitor sweeps conformance log groups.
+
+### Fixed
+- **Minimum Terraform version.** Since 0.3.0 (DNS Firewall) the configuration has used
+  validation rules that compare variables, which need Terraform 1.9, while
+  declaring `>= 1.5`; on 1.5-1.8 it failed with "Invalid reference in variable
+  validation". `required_version` is now `>= 1.9.0` (1.8 now gets a clear
+  version error) and the README says so.
+- Sigma tests: a `.` that acted as a regex wildcard went undetected; the
+  generator now produces dot-substituted near-misses, and a hand-written case
+  covers it.
+
 ## 0.11.0: Live tiers in a sandbox account
 
 ### Added

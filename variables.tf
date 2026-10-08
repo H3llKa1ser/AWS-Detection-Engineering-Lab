@@ -398,3 +398,31 @@ variable "sigma_generated_dir" {
   type        = string
   default     = "sigma/generated"
 }
+
+variable "enable_sigma_log_alarms" {
+  description = "Also run each Sigma rule as a CloudWatch Logs Insights log alarm (needs the hashicorp/awscc provider). Saved queries are created either way."
+  type        = bool
+  default     = true
+}
+
+variable "sigma_log_alarm_schedule_minutes" {
+  description = "How often each Sigma log alarm runs its Logs Insights query."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.sigma_log_alarm_schedule_minutes >= 1
+    error_message = "sigma_log_alarm_schedule_minutes must be at least 1."
+  }
+}
+
+variable "sigma_log_alarm_lookback_minutes" {
+  description = "Window each run searches; keep it longer than the schedule to tolerate CloudTrail's delivery delay to CloudWatch Logs."
+  type        = number
+  default     = 15
+
+  validation {
+    condition     = var.sigma_log_alarm_lookback_minutes >= var.sigma_log_alarm_schedule_minutes
+    error_message = "The lookback must cover at least one schedule interval, or events between runs are never searched."
+  }
+}
