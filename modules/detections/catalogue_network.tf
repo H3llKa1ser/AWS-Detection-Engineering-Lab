@@ -2,7 +2,9 @@
 # Network + DNS detection catalogue
 #
 # Same contract as catalogue.tf, plus:
-#   source     - which log group the filter attaches to (vpc_flow | dns)
+#   source     - which telemetry the filter needs (vpc_flow | dns | dns_firewall;
+#                dns_firewall reads the DNS query log group but only deploys
+#                when DNS Firewall is enabled)
 #   threshold  - matches per period before alarming (default 1)
 #   flow_match - VPC Flow Log detections only: map of field => condition.
 #                The space-delimited pattern is generated from flow_fields,
@@ -85,6 +87,22 @@ locals {
       attack      = "T1090.003 Proxy: Multi-hop Proxy"
       threshold   = 1
       pattern     = "{ $.query_name = \"*.onion.\" }"
+    }
+
+    # --- DNS Firewall verdicts (written into the Resolver query logs) -----------
+    dns_firewall_block = {
+      source      = "dns_firewall"
+      description = "DNS Firewall blocked a query (threat-listed or denylisted domain). The block stopped resolution, not the compromise: find the asking host"
+      attack      = "T1071.004 Application Layer Protocol: DNS / T1568 Dynamic Resolution"
+      threshold   = 1
+      pattern     = "{ $.firewall_rule_action = \"BLOCK\" }"
+    }
+    dns_firewall_alert = {
+      source      = "dns_firewall"
+      description = "DNS Firewall ALERT rule matched (list in evaluation mode, query was answered)"
+      attack      = "T1071.004 Application Layer Protocol: DNS / T1568 Dynamic Resolution"
+      threshold   = 1
+      pattern     = "{ $.firewall_rule_action = \"ALERT\" }"
     }
   }
 }

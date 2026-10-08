@@ -86,6 +86,35 @@ resource "aws_iam_role_policy_attachment" "config" {
   policy_arn = "arn:${var.partition}:iam::aws:policy/service-role/AWS_ConfigRole"
 }
 
+# With a custom (non-service-linked) role, Config delivers to S3 *as this role*,
+# and AWS_ConfigRole grants no S3 access. Without this the recorder runs but
+# the delivery channel cannot write snapshots or history.
+data "aws_iam_policy_document" "config_delivery" {
+  statement {
+    sid       = "DeliverConfigItems"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:PutObjectAcl"]
+    resources = ["${aws_s3_bucket.config.arn}/AWSLogs/${var.account_id}/*"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
+  statement {
+    sid       = "CheckBucketAcl"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.config.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "config_delivery" {
+  name   = "${var.name_prefix}-config-delivery"
+  role   = aws_iam_role.config.id
+  policy = data.aws_iam_policy_document.config_delivery.json
+}
+
 resource "aws_config_configuration_recorder" "main" {
   name     = "${var.name_prefix}-recorder"
   role_arn = aws_iam_role.config.arn
@@ -98,7 +127,7 @@ resource "aws_config_configuration_recorder" "main" {
 resource "aws_config_delivery_channel" "main" {
   name           = "${var.name_prefix}-delivery"
   s3_bucket_name = aws_s3_bucket.config.id
-  depends_on     = [aws_config_configuration_recorder.main, aws_s3_bucket_policy.config]
+  depends_on     = [aws_config_configuration_recorder.main, aws_s3_bucket_policy.config, aws_iam_role_policy.config_delivery]
 }
 
 resource "aws_config_configuration_recorder_status" "main" {

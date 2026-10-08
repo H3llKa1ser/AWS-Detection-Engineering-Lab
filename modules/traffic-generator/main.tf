@@ -2,7 +2,7 @@
 # Opt-in traffic generator (disabled by default)
 #
 # One small instance in the isolated lab VPC that runs src/dnsgen.py as a
-# systemd service. Hardened: no ingress, no public IP, no instance role,
+# systemd service. Hardened: no SG rules, no public IP, no instance role,
 # IMDSv2 required, encrypted root volume. It exists only to produce telemetry.
 # ---------------------------------------------------------------------------
 
@@ -10,18 +10,14 @@ data "aws_ssm_parameter" "al2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
+# Zero rules in either direction. Security groups do not filter traffic to the
+# Amazon DNS server (or IMDS / Time Sync), so DNS still works, and nothing else
+# can leave or reach the instance. Terraform removes AWS's default allow-all
+# egress rule because none is declared here.
 resource "aws_security_group" "generator" {
   name        = "${var.name_prefix}-traffic-generator"
-  description = "Traffic generator: no ingress, egress for DNS only"
+  description = "Traffic generator: no ingress or egress rules"
   vpc_id      = var.vpc_id
-
-  egress {
-    description = "DNS to Route 53 Resolver"
-    from_port   = 53
-    to_port     = 53
-    protocol    = "udp"
-    cidr_blocks = ["169.254.169.253/32"]
-  }
 }
 
 locals {

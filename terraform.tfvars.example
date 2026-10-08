@@ -31,3 +31,24 @@ monitored_vpc_ids = []
 
 # Opt-in: one t3.micro that generates DNS traffic to fire the DNS detections.
 deploy_traffic_generator = false
+
+# --- DNS Firewall ---
+enable_dns_firewall = true
+
+# Enforce on monitored_vpc_ids too (changes DNS answers for real workloads).
+dns_firewall_protect_monitored_vpcs = false
+
+# Production rollout: start with ALERT, review the logs, then switch to BLOCK.
+dns_firewall_managed_lists = [
+  { name = "AWSManagedDomainsMalwareDomainList", action = "BLOCK" },
+  { name = "AWSManagedDomainsBotnetCommandandControl", action = "BLOCK" },
+  { name = "AWSManagedDomainsAggregateThreatList", action = "BLOCK" },
+]
+
+dns_firewall_block_domains  = ["nanopool.org", "supportxmr.com", "minexmr.com", "moneroocean.stream", "hashvault.pro"]
+dns_firewall_allow_domains  = []
+dns_firewall_block_response = "NODATA"
+dns_firewall_fail_open      = false
+
+# Only needed without the AWS CLI (e.g. CI): name => rslvr-fdl-... for every list above.
+# dns_firewall_managed_list_ids = {}

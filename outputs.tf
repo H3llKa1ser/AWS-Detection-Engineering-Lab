@@ -47,3 +47,13 @@ output "traffic_generator_instance_id" {
   description = "Traffic generator instance id (null when not deployed)."
   value       = length(module.traffic_generator) > 0 ? module.traffic_generator[0].instance_id : null
 }
+
+output "dns_firewall_rules" {
+  description = "Effective DNS Firewall rule order (priority => action and list). Null when disabled."
+  value       = var.enable_dns_firewall ? module.dns_firewall[0].rules : null
+}
+
+output "dns_firewall_managed_list_ids" {
+  description = "Resolved managed-list IDs, to match firewall_domain_list_id in query logs."
+  value       = var.enable_dns_firewall ? module.dns_firewall[0].managed_domain_list_ids : null
+}

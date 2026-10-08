@@ -13,6 +13,9 @@ Every cycle it produces:
   * lookups of public cryptomining-pool hostnames (also expected to raise a
     real GuardDuty CryptoCurrency:EC2/BitcoinTool.B!DNS finding)
   * a .onion lookup (Tor usage indicator)
+  * the AWS-published test domains for the DNS Firewall managed lists, which
+    resolve to 1.2.3.4 when allowed and get the rule's block response when
+    blocked
 
 Nothing here contacts a mining pool or Tor: it only asks the resolver for names.
 """
@@ -25,6 +28,14 @@ import time
 RESOLVER = "169.254.169.253"  # Route 53 Resolver, reachable from any VPC
 QTYPES = {"A": 1, "TXT": 16}
 CYCLE_SECONDS = 900
+
+# AWS-published canaries for the managed DNS Firewall lists. They resolve to
+# 1.2.3.4 unless a rule blocks them. Only the us-east-1 form exists publicly,
+# and it is the documented form for testing in every region.
+FIREWALL_TEST_DOMAINS = [
+    f"controldomain1.{lst}.firewall.route53resolver.us-east-1.amazonaws.com"
+    for lst in ("botnetlist", "malwarelist", "aggregatelist")
+]
 
 MINING_POOL_NAMES = [
     "xmr.nanopool.org",
@@ -63,6 +74,8 @@ def cycle() -> None:
     for name in MINING_POOL_NAMES:
         query(name)
     query("detlabtest.onion")
+    for name in FIREWALL_TEST_DOMAINS:
+        query(name)
 
 
 if __name__ == "__main__":

@@ -116,3 +116,89 @@ variable "deploy_traffic_generator" {
   type        = bool
   default     = false
 }
+
+# --- DNS Firewall ------------------------------------------------------------
+
+variable "enable_dns_firewall" {
+  description = "Deploy Route 53 Resolver DNS Firewall with AWS-managed threat lists, plus the DNS Firewall detections."
+  type        = bool
+  default     = true
+}
+
+variable "dns_firewall_protect_monitored_vpcs" {
+  description = "Also enforce DNS Firewall on monitored_vpc_ids. Off by default: blocking changes DNS answers for real workloads, so it is opt-in. The lab VPC is always protected when it exists."
+  type        = bool
+  default     = false
+}
+
+variable "dns_firewall_managed_lists" {
+  description = "AWS-managed domain lists to enforce, in evaluation order. Specific lists first so logs attribute a match to its category; the aggregate list catches the rest. AWS recommends ALERT first in production, then BLOCK once evaluated."
+  type = list(object({
+    name   = string
+    action = string
+  }))
+  default = [
+    { name = "AWSManagedDomainsMalwareDomainList", action = "BLOCK" },
+    { name = "AWSManagedDomainsBotnetCommandandControl", action = "BLOCK" },
+    { name = "AWSManagedDomainsAggregateThreatList", action = "BLOCK" },
+  ]
+
+  validation {
+    condition     = alltrue([for l in var.dns_firewall_managed_lists : contains(["BLOCK", "ALERT"], upper(l.action))])
+    error_message = "Each managed list action must be BLOCK or ALERT."
+  }
+  validation {
+    condition     = alltrue([for l in var.dns_firewall_managed_lists : startswith(l.name, "AWSManagedDomains")])
+    error_message = "Managed list names start with AWSManagedDomains (e.g. AWSManagedDomainsAggregateThreatList)."
+  }
+  validation {
+    condition     = length(distinct([for l in var.dns_firewall_managed_lists : l.name])) == length(var.dns_firewall_managed_lists)
+    error_message = "Each managed list may appear only once."
+  }
+}
+
+variable "dns_firewall_managed_list_ids" {
+  description = "Optional name => id map for the managed lists. Lists named here skip the AWS CLI lookup; supply all of them to run without the AWS CLI (e.g. in CI)."
+  type        = map(string)
+  default     = {}
+}
+
+variable "dns_firewall_block_domains" {
+  description = "Apex domains to always block (subdomains included). Defaults to the public cryptomining pools the dns_mining_pool_lookup detection watches for."
+  type        = list(string)
+  default     = ["nanopool.org", "supportxmr.com", "minexmr.com", "moneroocean.stream", "hashvault.pro"]
+}
+
+variable "dns_firewall_allow_domains" {
+  description = "Apex domains always allowed (subdomains included), evaluated before every block rule. Use for confirmed false positives."
+  type        = list(string)
+  default     = []
+}
+
+variable "dns_firewall_block_response" {
+  description = "Answer for blocked queries. NODATA (default) keeps rcode NOERROR, so blocks do not inflate the NXDOMAIN detection."
+  type        = string
+  default     = "NODATA"
+
+  validation {
+    condition     = contains(["NODATA", "NXDOMAIN", "OVERRIDE"], var.dns_firewall_block_response)
+    error_message = "dns_firewall_block_response must be NODATA, NXDOMAIN or OVERRIDE."
+  }
+}
+
+variable "dns_firewall_block_override_domain" {
+  description = "Sinkhole domain returned as a CNAME when dns_firewall_block_response = OVERRIDE."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.dns_firewall_block_response != "OVERRIDE" || length(var.dns_firewall_block_override_domain) > 0
+    error_message = "Set dns_firewall_block_override_domain when dns_firewall_block_response = OVERRIDE."
+  }
+}
+
+variable "dns_firewall_fail_open" {
+  description = "Behaviour if DNS Firewall cannot evaluate a query. false (fail closed) favours security; true favours availability."
+  type        = bool
+  default     = false
+}

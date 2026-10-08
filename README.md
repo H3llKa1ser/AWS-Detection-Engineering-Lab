@@ -22,7 +22,8 @@ architecture and infrastructure-as-code in one repo.
 | **Config & compliance** | AWS Config recorder + 10 managed rules | Continuous configuration drift / misconfiguration detection |
 | **Managed detection** | GuardDuty, Security Hub (AWS FSBP + CIS 1.4) | Behavioural threat detection and standards scoring |
 | **Network telemetry** | VPC Flow Logs (custom v5 format) + Route 53 Resolver query logs → CloudWatch Logs, isolated lab VPC | Network and DNS visibility you own and can write detections against |
-| **Detection-as-code** | 24 CloudWatch metric-filter alarms over CloudTrail, flow and DNS logs | CIS monitoring controls + network/DNS threat detections, mapped to MITRE ATT&CK |
+| **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists + custom block/allow lists | Prevention: known-bad domains get no answer, and every verdict is logged |
+| **Detection-as-code** | 26 CloudWatch metric-filter alarms over CloudTrail, flow and DNS logs | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -43,13 +44,15 @@ flowchart LR
 
     subgraph Net["Lab VPC + monitored VPCs"]
         FL[VPC Flow Logs]
+        FW[DNS Firewall<br/>managed + custom lists]
         DNS[Route 53 Resolver<br/>query logs]
+        FW -->|verdict: BLOCK / ALERT| DNS
     end
 
     CT -->|log stream| CWL[CloudWatch Logs]
     FL --> CWL
     DNS --> CWL
-    CWL -->|metric filters| ALM[24 Metric-filter Alarms]
+    CWL -->|metric filters| ALM[26 Metric-filter Alarms]
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
 
     CFG --> SH
@@ -73,25 +76,25 @@ declare only the fields they care about; the 22-field space-delimited pattern is
 generated for you. Detections for a telemetry source that is switched off are
 skipped automatically.
 
-### CloudTrail (CIS AWS Foundations monitoring controls)
+### CloudTrail (CIS AWS Foundations Benchmark v1.4.0, section 4: Monitoring)
 
 | Detection | CIS | MITRE ATT&CK |
 |-----------|-----|--------------|
-| Unauthorized / access-denied API calls | 3.1 | T1078 Valid Accounts |
-| Console sign-in without MFA | 3.2 | T1078 Valid Accounts |
-| Root account usage | 3.3 | T1078.004 Cloud Accounts |
-| IAM policy changes | 3.4 | T1098 Account Manipulation |
-| CloudTrail config changes | 3.5 | T1562.008 Disable Cloud Logs |
-| Failed console authentication | 3.6 | T1110 Brute Force |
-| KMS CMK disable / delete | 3.7 | T1486 Data Encrypted for Impact |
-| S3 bucket policy / ACL changes | 3.8 | T1530 Data from Cloud Storage |
-| AWS Config service changes | 3.9 | T1562.008 Disable Cloud Logs |
-| Security group changes | 3.10 | T1562.007 Modify Cloud Firewall |
-| Network ACL changes | 3.11 | T1562.007 Modify Cloud Firewall |
-| Network gateway changes | 3.12 | T1562.007 Modify Cloud Firewall |
-| Route table changes | 3.13 | T1562.007 Modify Cloud Firewall |
-| VPC changes | 3.14 | T1562.007 Modify Cloud Firewall |
-| AWS Organizations changes | 3.15 | T1098 Account Manipulation |
+| Unauthorized / access-denied API calls | 4.1 | T1078 Valid Accounts |
+| Console sign-in without MFA | 4.2 | T1078 Valid Accounts |
+| Root account usage | 4.3 | T1078.004 Cloud Accounts |
+| IAM policy changes | 4.4 | T1098 Account Manipulation |
+| CloudTrail config changes | 4.5 | T1562.008 Disable Cloud Logs |
+| Failed console authentication | 4.6 | T1110 Brute Force |
+| KMS CMK disable / delete | 4.7 | T1486 Data Encrypted for Impact |
+| S3 bucket policy / ACL changes | 4.8 | T1530 Data from Cloud Storage |
+| AWS Config service changes | 4.9 | T1562.008 Disable Cloud Logs |
+| Security group changes | 4.10 | T1562.007 Modify Cloud Firewall |
+| Network ACL changes | 4.11 | T1562.007 Modify Cloud Firewall |
+| Network gateway changes | 4.12 | T1562.007 Modify Cloud Firewall |
+| Route table changes | 4.13 | T1562.007 Modify Cloud Firewall |
+| VPC changes | 4.14 | T1562.007 Modify Cloud Firewall |
+| AWS Organizations changes | 4.15 | T1098 Account Manipulation |
 
 ### Network and DNS
 
@@ -106,6 +109,8 @@ skipped automatically.
 | TXT query spike | DNS | 100 | T1071.004 Application Layer Protocol: DNS |
 | Cryptomining pool lookup | DNS | 1 | T1496 Resource Hijacking |
 | `.onion` lookup | DNS | 1 | T1090.003 Multi-hop Proxy |
+| DNS Firewall blocked a query | DNS Firewall | 1 | T1071.004 / T1568 Dynamic Resolution |
+| DNS Firewall ALERT rule matched | DNS Firewall | 1 | T1071.004 / T1568 Dynamic Resolution |
 
 ### How this relates to GuardDuty
 
@@ -117,12 +122,54 @@ raw telemetry: transparent, tunable detections you wrote, retention you control,
 and data to hunt through. The two layers overlap on purpose: the traffic
 generator's mining-pool lookups should trip both `dns_mining_pool_lookup` and
 GuardDuty's `CryptoCurrency:EC2/BitcoinTool.B!DNS`, which is a useful
-side-by-side of custom vs managed detection.
+side-by-side of custom vs managed detection. By default DNS Firewall also blocks
+those mining-pool domains (see below); set `dns_firewall_block_domains = []` for
+the cleanest GuardDuty comparison, since I have not verified whether GuardDuty
+still raises that finding for a query DNS Firewall blocked.
+
+## DNS Firewall: block, not just detect
+
+Every detection above tells you something already happened. DNS Firewall stops a
+class of it from working: a query for a known-bad domain gets no usable answer,
+so malware cannot find its command-and-control server and a miner cannot find its
+pool. One rule group, first match wins:
+
+| Priority | Action | Domain list |
+|----------|--------|-------------|
+| 100 | ALLOW | Your allow list (`dns_firewall_allow_domains`): false-positive overrides |
+| 200 | BLOCK | Your block list (`dns_firewall_block_domains`): defaults to public mining pools |
+| 300 | BLOCK | `AWSManagedDomainsMalwareDomainList` |
+| 310 | BLOCK | `AWSManagedDomainsBotnetCommandandControl` |
+| 320 | BLOCK | `AWSManagedDomainsAggregateThreatList` (superset of the others; catches the rest) |
+
+The specific managed lists run before the aggregate so a block is attributed to
+its category in the logs. Design choices, all configurable:
+
+- **Per-list action.** Each managed list is `BLOCK` or `ALERT`. AWS's own advice
+  for production is to start in `ALERT`, evaluate, then switch to `BLOCK`; the
+  lab defaults to `BLOCK` because the lab VPC has nothing to break.
+- **`NODATA` block response.** Blocked queries keep `rcode = NOERROR`, so blocks
+  do not inflate the NXDOMAIN (DGA) detection. `NXDOMAIN` and a sinkhole
+  `OVERRIDE` are available.
+- **Fail closed.** If DNS Firewall cannot evaluate a query, the query is blocked.
+  Set `dns_firewall_fail_open = true` to favour availability.
+- **Lab VPC only by default.** Blocking changes DNS answers, so enforcement on
+  `monitored_vpc_ids` is a separate opt-in (`dns_firewall_protect_monitored_vpcs`).
+- **Verdicts are telemetry.** DNS Firewall writes `firewall_rule_action` and
+  `firewall_domain_list_id` into the Resolver query logs, and two detections alert
+  on `BLOCK` and `ALERT`. A block stopped the lookup, not the compromise: it is
+  still an incident on the asking host.
+
+Managed-list IDs differ per region and the AWS provider cannot look a list up by
+name, so a small script asks the AWS CLI for them at plan time. Each resolved ID
+is then read through the provider and checked to really be that AWS-managed list
+before any rule uses it. Without the AWS CLI (e.g. in CI), pass the IDs in
+`dns_firewall_managed_list_ids`.
 
 ## Prerequisites
 
 - Terraform >= 1.5
-- AWS CLI v2, authenticated to a **non-production / sandbox account** you can afford to deploy managed services in
+- AWS CLI v2 and bash, authenticated to a **non-production / sandbox account** you can afford to deploy managed services in (the CLI is also used at plan time to resolve DNS Firewall managed-list IDs)
 - Permissions to create IAM, CloudTrail, Config, GuardDuty, Security Hub, SNS, EventBridge, Lambda, KMS and S3 resources
 
 ## Deploy
@@ -155,8 +202,10 @@ fast path:
 aws ec2 create-security-group --group-name detlab-test --description test
 # -> fires the "security group changes" alarm within ~5 minutes
 
-# 3. Exercise the DNS detections: set deploy_traffic_generator = true, apply,
-#    and within ~10 minutes the NXDOMAIN, TXT, mining-pool and .onion alarms fire
+# 3. Exercise the DNS and DNS Firewall detections: set deploy_traffic_generator
+#    = true, apply, and within ~10 minutes the NXDOMAIN, TXT, mining-pool, .onion
+#    and DNS Firewall block alarms fire (the generator queries AWS's test domains
+#    for the managed lists)
 terraform apply -var deploy_traffic_generator=true
 ```
 
@@ -172,7 +221,9 @@ copy), GuardDuty and Security Hub bill on events/findings analysed, Config bills
 per configuration item recorded and per rule evaluation. Flow logs and DNS query
 logs bill on CloudWatch Logs ingestion: negligible on the empty lab VPC, but
 budget for it before adding a busy VPC to `monitored_vpc_ids`. The lab VPC
-itself is free (no NAT gateway); the opt-in traffic generator is one t3.micro. Expect **single-digit
+itself is free (no NAT gateway); the opt-in traffic generator is one t3.micro.
+DNS Firewall bills on queries inspected and on domains held in your own lists;
+the AWS-managed lists carry no charge of their own. Expect **single-digit
 to low-tens of USD/month** idle; more if you generate heavy activity. Destroy
 when you are done.
 
@@ -198,6 +249,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── lab-vpc/           # isolated, zero-cost VPC to monitor
 │   ├── vpc-flow-logs/     # VPC Flow Logs -> CWL (custom v5 format)
 │   ├── dns-query-logging/ # Route 53 Resolver query logs -> CWL
+│   ├── dns-firewall/      # DNS Firewall rule group, managed + custom lists
 │   ├── detections/        # detection-as-code catalogue (metric filters)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── response/          # opt-in Lambda auto-response
@@ -209,7 +261,8 @@ removes them even with objects inside. (Remove that in any real deployment.)
 ## Roadmap
 
 - [x] VPC Flow Logs + Route 53 Resolver query logging modules, with network and DNS detections
-- [ ] Route 53 Resolver DNS Firewall with a managed threat domain list (block, not just detect)
+- [x] Route 53 Resolver DNS Firewall with managed threat domain lists (block, not just detect)
+- [ ] DNS Firewall Advanced (native DGA and DNS-tunnelling rules). Not expressible with `hashicorp/aws` 5.x, whose firewall rule requires a domain list
 - [ ] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
@@ -220,6 +273,10 @@ removes them even with objects inside. (Remove that in any real deployment.)
 This is a learning / demonstration lab. The Terraform is `terraform validate`-clean
 but you are responsible for the cost and blast radius in your own account. Deploy
 only in an account you own and can safely tear down.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md), including corrections made to earlier versions.
 
 ## License
 

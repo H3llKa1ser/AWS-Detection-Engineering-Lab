@@ -13,7 +13,8 @@
 4. **Least privilege, partition-safe.** IAM is scoped per component; ARNs are
    built from `aws_partition` so the code also works in GovCloud / China.
 5. **Opt-in blast radius.** Anything that mutates the account (the Lambda
-   response) is behind a flag and defaults off.
+   response) is behind a flag and defaults off. Anything that changes how real
+   workloads behave (DNS Firewall on monitored VPCs) is a separate opt-in.
 
 ## Data flow
 
@@ -95,3 +96,53 @@ DNS detection from inside it. Flow detections need real traffic: point
 `monitored_vpc_ids` at a VPC with workloads (or with an internet-facing
 instance) to see them fire. The VPC's default security group is managed with no
 rules so the lab stays compliant with its own `vpc-default-sg-closed` Config rule.
+
+## DNS Firewall (prevention layer)
+
+### Where it sits
+
+DNS Firewall evaluates every query a protected VPC sends to the Route 53
+Resolver, before the Resolver answers. It is the only *preventive* control in
+the lab; everything else detects or records. Its verdicts land in the same
+Resolver query logs as every other DNS record, so prevention and detection share
+one telemetry stream.
+
+### Rule order and attribution
+
+First match wins, lowest priority number first. The allow list sits on top so a
+false positive is fixed by adding a domain, never by weakening a block rule.
+The specific managed lists (malware, botnet C2) run before the aggregate list,
+which is a superset of them: the aggregate rule still catches everything else,
+but a hit on a specific list is logged with that list's `firewall_domain_list_id`,
+telling the analyst the category without extra lookups. The
+`dns_firewall_managed_list_ids` output maps those IDs back to names.
+
+### Resolving managed-list IDs
+
+AWS-managed lists have region-specific IDs, and `hashicorp/aws` has no data
+source that finds a domain list by name. The module runs
+`modules/dns-firewall/scripts/lookup-managed-domain-lists.sh` (an `external` data
+source) which calls `aws route53resolver list-firewall-domain-lists` and returns
+the AWS-owned lists. Every ID is then read through the provider with a
+postcondition that its name matches and it is AWS-managed, so a wrong or stale ID
+fails the plan instead of silently creating a rule against the wrong list.
+
+### Failure modes
+
+- **Fail closed (default).** If DNS Firewall cannot evaluate a query, the query
+  is blocked. Right for a security lab; for production, decide per VPC whether a
+  DNS outage or an unfiltered query is the worse outcome.
+- **Bypass.** DNS Firewall only sees queries sent to the Route 53 Resolver. A
+  workload that talks to an external resolver directly (with an internet path)
+  bypasses it. Pair it with egress controls that only allow DNS to the Resolver,
+  and with the flow-log detection for egress port 53 described in the catalogue
+  docs.
+- **Not a substitute for GuardDuty.** AWS states the managed lists are an extra
+  layer, not a replacement for GuardDuty.
+
+### Not covered: DNS Firewall Advanced
+
+AWS also offers rules that detect DGA and DNS-tunnelling patterns natively,
+without a domain list. In `hashicorp/aws` 5.x the firewall rule resource requires
+a domain list, so those rules are not expressible here; the lab's DNS detections
+cover those patterns from the query logs instead.

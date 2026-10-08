@@ -101,3 +101,36 @@ snapshot it, and rotate the credentials involved.
 A `.onion` name cannot resolve through normal DNS, so the lookup itself is the
 signal: something on the host thinks it can reach Tor. Identify the process on
 the instance and check for a local Tor client or proxy configuration.
+
+## DNS Firewall block / alert
+
+A block means the lookup failed, not that the host is clean. Something on that
+instance asked for a known-bad or denylisted domain.
+
+```
+# log group: /<prefix>/route53-resolver-queries
+filter firewall_rule_action = "BLOCK" or firewall_rule_action = "ALERT"
+| stats count(*) as hits, earliest(query_timestamp) as first_seen by srcids.instance, query_name, firewall_domain_list_id, firewall_rule_action
+| sort hits desc
+```
+
+1. Map `firewall_domain_list_id` to a list name with
+   `terraform output dns_firewall_managed_list_ids` (or it is your custom
+   blocklist). Malware or botnet C2 lists: treat the instance as compromised.
+2. Check the same instance's other DNS and flow activity for the same window:
+   did it reach anything by IP after the name lookup failed?
+3. Find what launched or last changed the instance (CloudTrail `RunInstances`,
+   `ModifyInstanceAttribute`, SSM `SendCommand`).
+4. Contain (quarantine security group), snapshot the volume, then investigate.
+
+**ALERT** matches come from lists running in evaluation mode. Review a few days
+of them; if they are all real threats or all noise you can explain, switch the
+list to BLOCK, adding any explained noise to the allow list first.
+
+### False positive
+
+AWS's documented approach: confirm in the query log which rule group and list
+blocked the domain, then allow it with a higher-priority rule rather than
+weakening the block rule. Here that means adding the apex domain to
+`dns_firewall_allow_domains` (priority 100, ahead of every block rule) and
+applying. Record why in the commit message.

@@ -35,7 +35,11 @@ def handler(event, _context):
     probe_details = remote.get("portProbeDetails", [])
 
     instance = detail.get("resource", {}).get("instanceDetails", {})
-    sg_ids = [sg["groupId"] for sg in instance.get("networkInterfaces", [{}])[0].get("securityGroups", [])]
+    sg_ids = sorted({
+        sg["groupId"]
+        for eni in instance.get("networkInterfaces", [])
+        for sg in eni.get("securityGroups", [])
+    })
 
     revoked = []
     for sg_id in sg_ids:
@@ -44,7 +48,7 @@ def handler(event, _context):
             if port is None:
                 continue
             try:
-                ec2.revoke_security_group_ingress(
+                resp = ec2.revoke_security_group_ingress(
                     GroupId=sg_id,
                     IpPermissions=[{
                         "IpProtocol": "tcp",
@@ -53,7 +57,12 @@ def handler(event, _context):
                         "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
                     }],
                 )
-                revoked.append(f"{sg_id}:{port}")
+                # EC2 can return success while listing the rule as unknown,
+                # i.e. nothing matched and nothing was removed.
+                if resp.get("UnknownIpPermissions"):
+                    print(f"No matching 0.0.0.0/0 rule for {sg_id}:{port}")
+                else:
+                    revoked.append(f"{sg_id}:{port}")
             except ec2.exceptions.ClientError as exc:
                 print(f"No matching rule for {sg_id}:{port} ({exc})")
 

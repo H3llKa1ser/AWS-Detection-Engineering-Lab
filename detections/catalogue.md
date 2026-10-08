@@ -3,7 +3,7 @@
 Documentation for the detections defined as code in
 [`catalogue.tf`](../modules/detections/catalogue.tf) (CloudTrail) and
 [`catalogue_network.tf`](../modules/detections/catalogue_network.tf) (VPC Flow
-Logs, Route 53 Resolver query logs).
+Logs, Route 53 Resolver query logs, DNS Firewall verdicts).
 The Terraform map is the source of truth; keep this table in sync when you add
 or remove entries.
 
@@ -53,3 +53,6 @@ flow-log `log_format`, change `flow_fields` to match.
   bursts; exclude them by adding a `$.srcids.instance != "i-..."` clause.
 - **Egress SMB** to internal file servers is normal in Windows estates; add a
   `dstaddr` condition to exclude them.
+- **DNS Firewall alerts** fire on every BLOCK or ALERT verdict. If a busy VPC
+  produces steady blocks from a known, accepted cause, raise the threshold
+  rather than removing the rule, or allow-list the domain if it is benign.

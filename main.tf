@@ -106,7 +106,44 @@ module "dns_query_logging" {
   region             = local.region
 }
 
-# 6. Detection-as-code: metric-filter alarms over CloudTrail, flow and DNS logs.
+# 6. DNS Firewall: enforce, not just observe. Lab VPC only unless opted in.
+locals {
+  firewall_vpcs = var.dns_firewall_protect_monitored_vpcs ? local.monitored_vpcs : {
+    for k, v in local.monitored_vpcs : k => v if k == "lab"
+  }
+}
+
+module "dns_firewall" {
+  source = "./modules/dns-firewall"
+  count  = var.enable_dns_firewall ? 1 : 0
+
+  name_prefix             = var.name_prefix
+  region                  = local.region
+  vpc_ids                 = local.firewall_vpcs
+  managed_domain_lists    = var.dns_firewall_managed_lists
+  managed_domain_list_ids = var.dns_firewall_managed_list_ids
+  block_domains           = var.dns_firewall_block_domains
+  allow_domains           = var.dns_firewall_allow_domains
+  block_response          = var.dns_firewall_block_response
+  block_override_domain   = var.dns_firewall_block_override_domain
+  fail_open               = var.dns_firewall_fail_open
+}
+
+check "dns_firewall_visibility" {
+  assert {
+    condition     = !var.enable_dns_firewall || var.enable_dns_query_logging
+    error_message = "DNS Firewall is enabled without DNS query logging: queries will be blocked but nothing records what was blocked, and the dns_firewall_* detections are skipped."
+  }
+}
+
+check "dns_firewall_has_targets" {
+  assert {
+    condition     = !var.enable_dns_firewall || length(local.firewall_vpcs) > 0
+    error_message = "DNS Firewall is enabled but protects no VPC: set create_lab_vpc = true, or dns_firewall_protect_monitored_vpcs = true with monitored_vpc_ids."
+  }
+}
+
+# 7. Detection-as-code: metric-filter alarms over CloudTrail, flow and DNS logs.
 module "detections" {
   source = "./modules/detections"
 
@@ -117,16 +154,19 @@ module "detections" {
     ["cloudtrail"],
     var.enable_vpc_flow_logs ? ["vpc_flow"] : [],
     var.enable_dns_query_logging ? ["dns"] : [],
+    var.enable_dns_query_logging && var.enable_dns_firewall ? ["dns_firewall"] : [],
   )
 
   log_groups = merge(
     { cloudtrail = module.logging.cloudwatch_log_group_name },
     var.enable_vpc_flow_logs ? { vpc_flow = module.vpc_flow_logs[0].log_group_name } : {},
     var.enable_dns_query_logging ? { dns = module.dns_query_logging[0].log_group_name } : {},
+    # DNS Firewall verdicts are written into the same Resolver query logs.
+    var.enable_dns_query_logging ? { dns_firewall = module.dns_query_logging[0].log_group_name } : {},
   )
 }
 
-# 7. Optional traffic generator that exercises the DNS detections.
+# 8. Optional traffic generator that exercises the DNS detections.
 module "traffic_generator" {
   source = "./modules/traffic-generator"
   count  = var.deploy_traffic_generator && var.create_lab_vpc ? 1 : 0
@@ -143,7 +183,7 @@ check "traffic_generator_needs_lab_vpc" {
   }
 }
 
-# 8. Optional automated response to high-signal GuardDuty findings.
+# 9. Optional automated response to high-signal GuardDuty findings.
 module "response" {
   source = "./modules/response"
   count  = var.enable_response_automation ? 1 : 0
