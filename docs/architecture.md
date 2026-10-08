@@ -549,3 +549,37 @@ test asserts differ. Because all three share the parsed rule, parser bugs are
 caught by the hand-written expectations rather than by the differential
 comparison. Ten planted converter bugs were all caught. Limits: CloudWatch is
 modelled from its documentation, not executed.
+
+### Logs Insights: the second real-time path
+
+`scripts/sigma_convert.py` has a third backend that writes each rule as a
+CloudWatch Logs Insights filter. Every comparison and function it uses returns
+a boolean (documented), so `not` needs none of the NULL guarding SQL needs;
+`isIpInSubnet` returns false for a value that is not an IP, which is exactly the
+case that broke the Athena CIDR hunt before. String conditions become anchored
+RE2 regexes with `(?i)` unless `|cased`, every non-alphanumeric character
+escaped (so `.`, `_` and `%` are literal), and each is guarded with
+`ispresent()`.
+
+Two behaviours are not documented: how a JSON boolean appears as an
+auto-discovered field, and whether a JSON `null` counts as present. Boolean
+conditions are emitted as `(f = 1 or f = "true")` so either representation
+works; `null` is assumed to count as absent. The conformance tier ingests probe
+events and fails, naming the assumption, if either is wrong; offline tests run
+that check against a fake service that misbehaves in each way to prove it would.
+
+`modules/sigma-insights` deploys each rule as a saved query
+(`aws_cloudwatch_query_definition`) and a log alarm
+(`awscc_cloudwatch_log_alarm`: `count(*)` of the query, `>= 1` in 1 of 1 runs,
+every 5 minutes over a 15-minute lookback so CloudTrail's delivery delay to
+CloudWatch Logs is tolerated; an event can therefore be counted by up to three
+consecutive runs). The scheduled-query role follows AWS's documented policy:
+trusted by `logs.amazonaws.com`, limited to Logs Insights calls on the CloudTrail
+log group, plus `kms:Decrypt` via CloudWatch Logs for the encrypted group.
+
+| | Metric filter | Logs Insights log alarm | Athena hunt |
+|-|---------------|-------------------------|-------------|
+| Latency | event delivery + up to 5 min | event delivery + up to 5 min | CloudTrail S3 delivery (5-15 min) + schedule |
+| Semantics | case-sensitive; no exists, regex or CIDR | Sigma's (case-insensitive, `ispresent`, RE2, `isIpInSubnet`) | Sigma's |
+| History | from creation onwards | lookback window | full retention in S3 |
+| Provider | `hashicorp/aws` | `hashicorp/awscc` | `hashicorp/aws` |

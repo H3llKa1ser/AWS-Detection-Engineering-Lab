@@ -331,3 +331,13 @@ rule title, level and ATT&CK technique. Triage starts from the rule:
 identity, source IP and request parameters. Tune a noisy rule by adding a
 `filter_*` selection to the YAML, re-running the converter and the tests, and
 applying; never by editing generated files.
+
+### Sigma log alarms (Logs Insights)
+
+`<prefix>-insights-sigma_<rule>` is the same rule as `<prefix>-sigma_<rule>` (the
+metric filter), evaluated by Logs Insights. If both fire, it is one event seen
+twice; if only the Logs Insights one fires, the event matched in a way the
+metric filter cannot express (letter case, a missing field, an IP range). Open
+the saved query `<prefix>/sigma/<rule>` in Logs Insights for the matching events.
+A log alarm can stay in ALARM for up to its lookback (15 minutes by default)
+after one event, because overlapping runs see the event again.

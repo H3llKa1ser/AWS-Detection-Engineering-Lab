@@ -15,7 +15,7 @@ on demand and weekly, behind an approval-gated environment.
 
 | Tier | Deploys? | Time | What it proves |
 |------|----------|------|----------------|
-| **Conformance** | no | minutes | Real CloudWatch `TestMetricFilter` agrees with expected matches for all 26 built-in patterns and with the CloudWatch model for every Sigma pattern (case-flipped events included); real Athena computes the IP keys and CIDR ranges exactly as Python's `ipaddress` does |
+| **Conformance** | no | minutes | Real CloudWatch `TestMetricFilter` agrees with expected matches for all 26 built-in patterns and with the CloudWatch model for every Sigma pattern (case-flipped events included); real Logs Insights agrees with the model for every Sigma query, and probe events settle how JSON booleans and nulls behave; real Athena computes the IP keys and CIDR ranges exactly as Python's `ipaddress` does |
 | **End to end** | yes (unique prefix) | ~1-2 hours | Every saved query executes in real Athena; the retro-hunt fired by the indicator upload completes; a scheduled run succeeds with no FAILED hunts; safe triggers raise their alarms via SNS; hunts find the triggered activity once CloudTrail and Firehose deliver to S3; the Sigma hunts return exactly the reference result on synthetic CloudTrail files |
 
 Both start only after the full offline suite passes.
@@ -28,7 +28,8 @@ All are safe, reversible and scoped to the run's prefix:
 - an IAM user `e2e-...-target` created, an access key minted and deleted for
   it, the user deleted (hunt 05's "credential created for another identity");
 - an SSM `SendCommand` to a non-existent instance, rejected but recorded
-  (`sigma_ssm_command_by_human` alarm and hunt);
+  (`sigma_ssm_command_by_human` metric-filter alarm, its Logs Insights log
+  alarm, and its Athena hunt);
 - the traffic generator's DNS (DNS Firewall block, `.onion`, mining-pool and
   TXT alarms; the DNS lake; the intel canary in hunt 23);
 - synthetic CloudTrail log files written to the run's own CloudTrail bucket for
