@@ -219,20 +219,67 @@ locals {
       lookback_days = var.lookback_days
       recent_days   = var.recent_days
     })
+    raw     = file("${path.module}/queries/${f}")
     title   = trimspace(regex("(?m)^-- title:(.*)$", file("${path.module}/queries/${f}"))[0])
     attack  = trimspace(regex("(?m)^-- attack:(.*)$", file("${path.module}/queries/${f}"))[0])
     purpose = trimspace(regex("(?m)^-- purpose:(.*)$", file("${path.module}/queries/${f}"))[0])
+
+    # Optional scheduling metadata; absent means "not schedulable" (e.g. pivots).
+    time_column = try(trimspace(regex("(?m)^-- schedule-time-column:(.*)$", file("${path.module}/queries/${f}"))[0]), null)
+    baseline    = try(trimspace(regex("(?m)^-- schedule-baseline:(.*)$", file("${path.module}/queries/${f}"))[0]) == "true", false)
+  } }
+
+  schedulable = { for k, q in local.queries : k => q if q.time_column != null }
+
+  # Scheduled variants. Baseline hunts keep the full lookback (they need history
+  # to know what is new) with a 2-day "recent" span; the rest only need the last
+  # 2 days of partitions, which keeps daily scans small. The wrapper then keeps
+  # rows from the 24h window ending schedule_lag_hours before the run.
+  scheduled = { for k in var.scheduled_hunts : k => {
+    title  = lookup(local.queries, k, { title = k }).title
+    attack = lookup(local.queries, k, { attack = "" }).attack
+    sql = contains(keys(local.schedulable), k) ? templatefile("${path.module}/scheduled_wrapper.sql.tftpl", {
+      name        = k
+      time_column = local.schedulable[k].time_column
+      start_hours = 24 + var.schedule_lag_hours
+      end_hours   = var.schedule_lag_hours
+      inner = trimspace(templatefile("${path.module}/queries/${k}.sql", {
+        database      = local.database
+        table         = local.table
+        lookback_days = local.schedulable[k].baseline ? var.lookback_days : 2
+        recent_days   = 2
+      }))
+    }) : ""
   } }
 }
 
 resource "aws_athena_named_query" "hunt" {
   for_each = local.queries
 
-  name        = "${each.key}: ${each.value.title}"
+  name        = substr("${each.key}: ${each.value.title}", 0, 128)
   workgroup   = aws_athena_workgroup.hunting.name
   database    = aws_glue_catalog_database.security.name
   description = substr("${each.value.purpose} | ATT&CK: ${each.value.attack}", 0, 1024)
   query       = each.value.sql
+
+  depends_on = [aws_glue_catalog_table.cloudtrail]
+}
+
+resource "aws_athena_named_query" "scheduled" {
+  for_each = local.scheduled
+
+  name        = substr("scheduled/${each.key}: ${each.value.title}", 0, 128)
+  workgroup   = aws_athena_workgroup.hunting.name
+  database    = aws_glue_catalog_database.security.name
+  description = substr("Scheduled daily variant: findings from the 24h window ending ${var.schedule_lag_hours}h before each run. | ATT&CK: ${each.value.attack}", 0, 1024)
+  query       = each.value.sql
+
+  lifecycle {
+    precondition {
+      condition     = contains(keys(local.schedulable), each.key)
+      error_message = "Hunt '${each.key}' cannot be scheduled: it does not exist or declares no schedule-time-column. Schedulable: ${join(", ", sort(keys(local.schedulable)))}."
+    }
+  }
 
   depends_on = [aws_glue_catalog_table.cloudtrail]
 }
@@ -251,6 +298,13 @@ data "aws_iam_policy_document" "hunter" {
       "athena:BatchGetNamedQuery",
     ]
     resources = [aws_athena_workgroup.hunting.arn]
+  }
+
+  statement {
+    sid       = "ReadDefaultDataCatalog"
+    effect    = "Allow"
+    actions   = ["athena:GetDataCatalog"]
+    resources = ["arn:${var.partition}:athena:${var.region}:${var.account_id}:datacatalog/AwsDataCatalog"]
   }
 
   statement {

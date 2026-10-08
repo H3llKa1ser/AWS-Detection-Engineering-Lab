@@ -68,3 +68,22 @@ hunting_projection_start     = "2025/01/01"
 hunting_lookback_days        = 30
 hunting_recent_days          = 1
 hunting_bytes_scanned_cutoff = 10737418240 # 10 GiB per query
+
+# --- Scheduled hunts (daily; alert only on findings or failures) ---
+enable_scheduled_hunts = true
+hunt_schedule_hour     = 6
+hunt_schedule_timezone = "UTC"
+scheduled_hunts = [
+  "01_console_login_new_source",
+  "02_console_bruteforce_then_success",
+  "03_permission_probing",
+  "05_iam_persistence",
+  "06_defense_evasion_sensor_tampering",
+  "07_new_region_activity",
+  "08_data_shared_to_other_accounts",
+  "09_compute_hijacking",
+  "12_root_activity",
+  "13_new_role_assumption_path",
+  # Add once tuned for your environment:
+  # "04_enumeration_burst", "10_secret_harvesting", "11_instance_credentials_replayed",
+]

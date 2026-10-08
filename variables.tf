@@ -291,3 +291,54 @@ variable "hunting_bytes_scanned_cutoff" {
     error_message = "Athena's minimum per-query cutoff is 10 MB (10485760 bytes)."
   }
 }
+
+# --- Scheduled hunts ---------------------------------------------------------------
+
+variable "enable_scheduled_hunts" {
+  description = "Run the selected hunts daily and alert on findings or failures."
+  type        = bool
+  default     = true
+}
+
+variable "scheduled_hunts" {
+  description = "Hunts to run daily (query file names without .sql). The default leaves out 04, 10 and 11, which usually need tuning to your environment first."
+  type        = list(string)
+  default = [
+    "01_console_login_new_source",
+    "02_console_bruteforce_then_success",
+    "03_permission_probing",
+    "05_iam_persistence",
+    "06_defense_evasion_sensor_tampering",
+    "07_new_region_activity",
+    "08_data_shared_to_other_accounts",
+    "09_compute_hijacking",
+    "12_root_activity",
+    "13_new_role_assumption_path",
+  ]
+
+  validation {
+    condition     = length(distinct(var.scheduled_hunts)) == length(var.scheduled_hunts)
+    error_message = "Each hunt may be scheduled only once."
+  }
+  validation {
+    condition     = alltrue([for h in var.scheduled_hunts : can(regex("^[0-9]{2}_[a-z0-9_]+$", h))])
+    error_message = "Use query file names without .sql, e.g. 05_iam_persistence."
+  }
+}
+
+variable "hunt_schedule_hour" {
+  description = "Hour (0-23) the daily hunts start, in hunt_schedule_timezone."
+  type        = number
+  default     = 6
+
+  validation {
+    condition     = var.hunt_schedule_hour >= 0 && var.hunt_schedule_hour <= 23 && floor(var.hunt_schedule_hour) == var.hunt_schedule_hour
+    error_message = "hunt_schedule_hour must be a whole number from 0 to 23."
+  }
+}
+
+variable "hunt_schedule_timezone" {
+  description = "IANA timezone for the schedule. Keep UTC unless you have a reason: with DST, some days are 23h or 25h and the 24h windows would gap or overlap."
+  type        = string
+  default     = "UTC"
+}

@@ -201,3 +201,39 @@ them.
 
 If a query is cancelled for exceeding the scan cap, narrow the `dt` range rather
 than raising the cap. `hunting_bytes_scanned_cutoff` exists to stop accidents.
+
+### Scheduled hunt alerts
+
+Subject `[<prefix>] hunt findings: <hunt>`. The message is JSON:
+
+| Field | Use |
+|-------|-----|
+| `hunt`, `title`, `attack` | Which hunt, and the technique it looks for |
+| `findings_total` | Rows in this 24h window (the sample may show fewer) |
+| `sample_rows_including_header` | Row 0 holds column names; rows 1-5 are findings |
+| `results_csv` | S3 path of the complete result set |
+| `query_execution_id` | `aws athena get-query-results --query-execution-id <id>` |
+
+Triage as for the hunt itself (sections above). The window covers the 24h ending
+one hour before the run, so a finding is reported once; if it continues, the next
+day's run reports the new activity.
+
+**`hunt FAILED: <hunt>`**: that hunt did not run today, and is blind until fixed.
+The `cause` usually says why: scan cap exceeded (narrow the hunt or raise
+`hunting_bytes_scanned_cutoff`), permissions, or a query error after an edit.
+Fix, then run `terraform output -raw run_scheduled_hunts_now` and execute it.
+
+**`scheduled_hunts_execution_failed`**: the run itself broke, so no hunt
+reported. Open the execution in the Step Functions console for the failed step.
+
+**`scheduled_hunts_not_running`** (dead man's switch): no successful run on two
+consecutive days. Check the schedule is `ENABLED`
+(`aws scheduler get-schedule --name <prefix>-daily-hunts`), the scheduler role
+still exists, and the execution history. Silence from the hunts means nothing
+until this alarm is OK again.
+
+### Changing what runs
+
+Add or remove names in `scheduled_hunts` and apply. Before scheduling 04, 10 or
+11, run them by hand for a week and tune the thresholds in their SQL so a normal
+day is empty.

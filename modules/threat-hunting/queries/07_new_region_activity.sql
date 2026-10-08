@@ -1,6 +1,8 @@
 -- title: Write activity in a region this account does not normally use
 -- attack: T1535 Unused/Unsupported Cloud Regions
 -- purpose: Mutating API calls in the recent window in regions that had no mutating calls in the baseline window, where attackers hide miners and persistence.
+-- schedule-time-column: first_seen
+-- schedule-baseline: true
 -- Global-service events (IAM, STS, sign-in) are excluded because they are recorded in us-east-1 regardless of where they came from.
 WITH writes AS (
   SELECT

@@ -1,6 +1,8 @@
 -- title: Permission probing (AccessDenied across many APIs)
 -- attack: T1580 Cloud Infrastructure Discovery / T1069.003 Permission Groups Discovery: Cloud Groups
 -- purpose: Identities denied on 10+ distinct APIs within one hour, the pattern of a stolen key being tested to learn what it can do.
+-- schedule-time-column: hour
+-- schedule-baseline: false
 SELECT
   coalesce(useridentity.arn, useridentity.principalid) AS identity,
   useridentity.accesskeyid AS access_key,

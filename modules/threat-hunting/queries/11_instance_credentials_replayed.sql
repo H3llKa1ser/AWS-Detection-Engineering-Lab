@@ -1,6 +1,8 @@
 -- title: EC2 instance-role credentials used from several source IPs
 -- attack: T1552.005 Unsecured Credentials: Cloud Instance Metadata API / T1078.004 Valid Accounts: Cloud Accounts
 -- purpose: Instance-role sessions (one per instance) seen from more than one non-AWS source IP, a sign the temporary credentials were taken from IMDS and replayed elsewhere.
+-- schedule-time-column: last_seen
+-- schedule-baseline: false
 -- ec2roledelivery 1.0 means the credentials came from IMDSv1, the version SSRF bugs can reach. Complements GuardDuty InstanceCredentialExfiltration findings.
 -- False positives: instances whose egress IP changes (NAT gateway swap, new EIP) or that mix VPC-endpoint (private IP) and internet calls.
 SELECT

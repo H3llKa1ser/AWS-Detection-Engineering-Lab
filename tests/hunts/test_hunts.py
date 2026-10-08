@@ -88,13 +88,45 @@ def module_schema():
 
 # --- Rendering: same substitutions Terraform's templatefile() makes ----------
 
+def _fill(template, values):
+    for k, v in values.items():
+        template = template.replace("${" + k + "}", str(v))
+    assert "${" not in template, "unrendered template variable"
+    return template
+
+
+def render_athena(name, lookback_days=30, recent_days=1):
+    return _fill((MODULE / "queries" / f"{name}.sql").read_text(),
+                 {"database": DB, "table": TABLE, "lookback_days": lookback_days, "recent_days": recent_days})
+
+
 def render(name, lookback_days=30, recent_days=1):
-    sql = (MODULE / "queries" / f"{name}.sql").read_text()
-    for k, v in {"database": DB, "table": TABLE,
-                 "lookback_days": lookback_days, "recent_days": recent_days}.items():
-        sql = sql.replace("${" + k + "}", str(v))
-    assert "${" not in sql, f"unrendered variable in {name}"
-    return sqlglot.transpile(sql, read="athena", write="duckdb")[0]
+    return sqlglot.transpile(render_athena(name, lookback_days, recent_days), read="athena", write="duckdb")[0]
+
+
+def header(name, key):
+    m = re.search(rf"(?m)^-- {key}:(.*)$", (MODULE / "queries" / f"{name}.sql").read_text())
+    return m.group(1).strip() if m else None
+
+
+LAG_HOURS = 1
+
+
+def render_scheduled_athena(name):
+    """Mirror of local.scheduled in modules/threat-hunting/main.tf."""
+    baseline = header(name, "schedule-baseline") == "true"
+    inner = render_athena(name, lookback_days=30 if baseline else 2, recent_days=2).strip()
+    return _fill((MODULE / "scheduled_wrapper.sql.tftpl").read_text(), {
+        "name": name, "time_column": header(name, "schedule-time-column"),
+        "start_hours": 24 + LAG_HOURS, "end_hours": LAG_HOURS, "inner": inner})
+
+
+def render_scheduled(name):
+    return sqlglot.transpile(render_scheduled_athena(name), read="athena", write="duckdb")[0]
+
+
+def schedulable():
+    return sorted(p.stem for p in (MODULE / "queries").glob("*.sql") if header(p.stem, "schedule-time-column"))
 
 
 # --- Synthetic CloudTrail --------------------------------------------------------
@@ -132,7 +164,15 @@ def ev(name, source, at, ident, ip="198.51.100.10", err=None, req=None, resp=Non
     }
 
 
+FIXTURES = {}
+
+
 def run(name, events, **render_kw):
+    FIXTURES[name] = events
+    return run_sql(render(name, **render_kw), events)
+
+
+def run_sql(sql, events):
     con = duckdb.connect()
     con.execute("SET TimeZone = 'UTC'")
     con.execute(f"CREATE SCHEMA {DB}")
@@ -143,7 +183,7 @@ def run(name, events, **render_kw):
     cols = ", ".join(f"'{n}': '{glue_to_duckdb(t)}'" for n, t in schema)
     con.execute(f"CREATE TABLE {DB}.{TABLE} AS SELECT * FROM read_json('{fh.name}', "
                 f"format='newline_delimited', columns={{{cols}}})")
-    cur = con.execute(render(name, **render_kw))
+    cur = con.execute(sql)
     names = [d[0] for d in cur.description]
     return [dict(zip(names, row)) for row in cur.fetchall()]
 
@@ -340,9 +380,63 @@ def test_14_investigate_access_key():
     assert [r["eventname"] for r in rows] == ["ListBuckets", "GetCallerIdentity"], rows
 
 
+def shift(events, delta):
+    out = []
+    for e in events:
+        e = dict(e)
+        t = datetime.strptime(e["eventtime"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + delta
+        e["eventtime"], e["dt"] = t.strftime("%Y-%m-%dT%H:%M:%SZ"), t.strftime("%Y/%m/%d")
+        out.append(e)
+    return out
+
+
+def test_scheduled_variants_report_inside_window_only():
+    """Every schedulable hunt: same findings as the full hunt when the attack is
+    inside today's window, a correct findings_total, and nothing once it is 2 days old."""
+    for name in schedulable():
+        globals()[f"test_{name}"]()                       # (re)records this hunt's fixture
+        events = FIXTURES[name]
+        full = run_sql(render(name), events)
+        sched = run_sql(render_scheduled(name), events)
+        assert len(sched) == len(full) > 0, (name, len(full), len(sched))
+        assert all(r["findings_total"] == len(sched) for r in sched), name
+        old = run_sql(render_scheduled(name), shift(events, timedelta(days=-2)))
+        assert old == [], (name, old)
+
+
+def test_scheduled_window_edges_report_each_event_exactly_once():
+    """Two consecutive daily runs: an event lands in exactly one of them."""
+    x = user("intruder")
+    mk = lambda ago, tag: ev("CreateAccessKey", "iam.amazonaws.com", NOW - ago, x, req={"userName": tag})
+    events = [mk(timedelta(hours=26), "yesterdays-window"), mk(timedelta(hours=2), "todays-window"),
+              mk(timedelta(minutes=30), "inside-lag")]
+    today = {r["target_user"] for r in run_sql(render_scheduled("05_iam_persistence"), events)}
+    tomorrow = {r["target_user"] for r in run_sql(render_scheduled("05_iam_persistence"), shift(events, timedelta(days=-1)))}
+    assert today == {"todays-window"}, today
+    assert tomorrow == {"inside-lag"}, tomorrow       # held back by the lag today, reported tomorrow
+    assert not today & tomorrow                       # never twice
+
+
+def test_scheduled_sql_parses_as_athena():
+    for name in schedulable():
+        sqlglot.parse_one(render_scheduled_athena(name), read="athena", error_level=sqlglot.ErrorLevel.RAISE)
+
+
+def test_only_pivots_are_unschedulable():
+    unschedulable = {p.stem for p in (MODULE / "queries").glob("*.sql")} - set(schedulable())
+    assert unschedulable == {"14_investigate_access_key"}, unschedulable
+
+
+def test_default_schedule_names_only_schedulable_hunts():
+    src = (ROOT / "variables.tf").read_text()
+    block = re.search(r'variable "scheduled_hunts" \{.*?default = \[(.*?)\]', src, re.S).group(1)
+    defaults = re.findall(r'"([0-9]{2}_[a-z0-9_]+)"', block)
+    assert defaults and set(defaults) <= set(schedulable()), sorted(set(defaults) - set(schedulable()))
+
+
 def test_every_query_has_a_test():
     queries = {p.stem for p in (MODULE / "queries").glob("*.sql")}
-    tested = {n[5:] for n in globals() if n.startswith("test_") and n[5:7].isdigit()}
+    tested = {n[5:] for n in globals() if n.startswith("test_") and n[5:7].isdigit()}  # scheduled tests are extra
     assert queries == tested, f"untested: {sorted(queries - tested)}; stale: {sorted(tested - queries)}"
 
 

@@ -1,6 +1,8 @@
 -- title: Role assumption by a caller that has never assumed that role
 -- attack: T1078.004 Valid Accounts: Cloud Accounts / T1550.001 Use Alternate Authentication Material: Application Access Token
 -- purpose: AssumeRole calls in the recent window whose caller-to-role pair is absent from the baseline window, flagging cross-account hops. This is how lateral movement between roles and accounts looks.
+-- schedule-time-column: first_seen
+-- schedule-baseline: true
 WITH assumptions AS (
   SELECT
     from_iso8601_timestamp(eventtime) AS ts,

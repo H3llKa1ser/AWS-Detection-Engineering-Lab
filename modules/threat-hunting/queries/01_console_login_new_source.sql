@@ -1,6 +1,8 @@
 -- title: Console sign-in from a source IP new for that identity
 -- attack: T1078.004 Valid Accounts: Cloud Accounts
 -- purpose: Successful console sign-ins in the recent window from an IP the same identity never signed in from during the baseline window.
+-- schedule-time-column: first_seen
+-- schedule-baseline: true
 -- Tuning: a brand-new identity has no baseline, so every IP it uses appears once. Expected for new staff; worth a look otherwise.
 WITH logins AS (
   SELECT

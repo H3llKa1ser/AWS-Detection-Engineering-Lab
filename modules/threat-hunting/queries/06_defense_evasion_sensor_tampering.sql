@@ -1,6 +1,8 @@
 -- title: Tampering with logging, detection and alerting (this lab's own sensors)
 -- attack: T1562.008 Impair Defenses: Disable or Modify Cloud Logs / T1562.001 Impair Defenses: Disable or Modify Tools
 -- purpose: Calls that stop, delete or weaken CloudTrail, GuardDuty, Security Hub, Config, flow logs, Resolver query logging, DNS Firewall, alarms or alert routing, including failed attempts.
+-- schedule-time-column: ts
+-- schedule-baseline: false
 -- Your own Terraform applies appear here too: confirm the actor is your deployment principal and matches a change you made.
 SELECT
   from_iso8601_timestamp(eventtime) AS ts,

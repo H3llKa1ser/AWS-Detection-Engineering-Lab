@@ -1,6 +1,8 @@
 -- title: Every action taken as the root user
 -- attack: T1078.004 Valid Accounts: Cloud Accounts
 -- purpose: Root activity with MFA status and source, excluding actions AWS services perform on root's behalf. Root should almost never act interactively.
+-- schedule-time-column: ts
+-- schedule-baseline: false
 SELECT
   from_iso8601_timestamp(eventtime) AS ts,
   eventsource,

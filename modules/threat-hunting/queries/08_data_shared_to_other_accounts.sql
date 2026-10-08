@@ -1,6 +1,8 @@
 -- title: Snapshots, images and buckets shared outside the account
 -- attack: T1537 Transfer Data to Cloud Account
 -- purpose: Sharing and replication calls that expose data to other accounts or to everyone, with the foreign account IDs pulled out of the request.
+-- schedule-time-column: ts
+-- schedule-baseline: false
 -- Account IDs are matched as standalone 12-digit numbers, so longer numbers such as epoch-millisecond timestamps do not produce false matches.
 WITH shares AS (
   SELECT

@@ -1,0 +1,134 @@
+{
+  "Comment": "Daily scheduled threat hunts: run each saved query, alert only on findings or failures.",
+  "StartAt": "RunHunts",
+  "States": {
+    "RunHunts": {
+      "Type": "Map",
+      "ItemsPath": "$.hunts",
+      "MaxConcurrency": ${max_concurrency},
+      "ResultPath": null,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "GetSavedQuery",
+        "States": {
+          "GetSavedQuery": {
+            "Type": "Task",
+            "Comment": "Run exactly what is saved in the workgroup: one source of truth for hunters and the schedule.",
+            "Resource": "arn:${partition}:states:::aws-sdk:athena:getNamedQuery",
+            "Parameters": { "NamedQueryId.$": "$.namedQueryId" },
+            "ResultSelector": {
+              "sql.$": "$.NamedQuery.QueryString",
+              "database.$": "$.NamedQuery.Database"
+            },
+            "ResultPath": "$.query",
+            "Retry": [
+              { "ErrorEquals": ["Athena.TooManyRequestsException"], "IntervalSeconds": 10, "BackoffRate": 2, "MaxAttempts": 3 }
+            ],
+            "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "BuildFailureAlert" } ],
+            "Next": "RunQuery"
+          },
+          "RunQuery": {
+            "Type": "Task",
+            "Resource": "arn:${partition}:states:::athena:startQueryExecution.sync",
+            "Parameters": {
+              "QueryString.$": "$.query.sql",
+              "WorkGroup": "${workgroup}",
+              "QueryExecutionContext": { "Database.$": "$.query.database" }
+            },
+            "ResultSelector": {
+              "id.$": "$.QueryExecution.QueryExecutionId",
+              "bytesScanned.$": "$.QueryExecution.Statistics.DataScannedInBytes",
+              "outputLocation.$": "$.QueryExecution.ResultConfiguration.OutputLocation"
+            },
+            "ResultPath": "$.execution",
+            "Retry": [
+              { "ErrorEquals": ["Athena.TooManyRequestsException"], "IntervalSeconds": 30, "BackoffRate": 2, "MaxAttempts": 3 }
+            ],
+            "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "BuildFailureAlert" } ],
+            "Next": "GetResults"
+          },
+          "GetResults": {
+            "Type": "Task",
+            "Comment": "Header row plus up to ${sample_rows} findings; the wrapper's findings_total column carries the full count.",
+            "Resource": "arn:${partition}:states:::athena:getQueryResults",
+            "Parameters": {
+              "QueryExecutionId.$": "$.execution.id",
+              "MaxResults": ${max_results}
+            },
+            "ResultSelector": {
+              "rowCount.$": "States.ArrayLength($.ResultSet.Rows)",
+              "rows.$": "$.ResultSet.Rows"
+            },
+            "ResultPath": "$.results",
+            "Catch": [ { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "BuildFailureAlert" } ],
+            "Next": "AnyFindings"
+          },
+          "AnyFindings": {
+            "Type": "Choice",
+            "Comment": "Row 0 is the column header, so more than one row means findings.",
+            "Choices": [
+              { "Variable": "$.results.rowCount", "NumericGreaterThan": 1, "Next": "BuildFindingAlert" }
+            ],
+            "Default": "Clean"
+          },
+          "Clean": {
+            "Type": "Pass",
+            "Result": "clean",
+            "ResultPath": "$.outcome",
+            "End": true
+          },
+          "BuildFindingAlert": {
+            "Type": "Pass",
+            "Parameters": {
+              "alert": "Scheduled hunt returned findings",
+              "hunt.$": "$.name",
+              "title.$": "$.title",
+              "attack.$": "$.attack",
+              "findings_total.$": "$.results.rows[1].Data[0].VarCharValue",
+              "sample_rows_including_header.$": "$.results.rows",
+              "query_execution_id.$": "$.execution.id",
+              "results_csv.$": "$.execution.outputLocation",
+              "bytes_scanned.$": "$.execution.bytesScanned",
+              "next_step": "Open results_csv (or: aws athena get-query-results --query-execution-id <query_execution_id>) and triage per docs/runbook.md, section Threat hunting."
+            },
+            "ResultPath": "$.alert",
+            "Next": "PublishFindings"
+          },
+          "PublishFindings": {
+            "Type": "Task",
+            "Resource": "arn:${partition}:states:::sns:publish",
+            "Parameters": {
+              "TopicArn": "${topic_arn}",
+              "Subject.$": "States.Format('[${name_prefix}] hunt findings: {}', $.name)",
+              "Message.$": "States.JsonToString($.alert)"
+            },
+            "End": true
+          },
+          "BuildFailureAlert": {
+            "Type": "Pass",
+            "Parameters": {
+              "alert": "Scheduled hunt FAILED to run: this hunt is blind until fixed",
+              "hunt.$": "$.name",
+              "error.$": "$.error.Error",
+              "cause.$": "$.error.Cause",
+              "next_step": "Common causes: scan cap exceeded (narrow the window or raise hunting_bytes_scanned_cutoff), missing permission, or a query error. Re-run with: aws stepfunctions start-execution."
+            },
+            "ResultPath": "$.alert",
+            "Next": "PublishFailure"
+          },
+          "PublishFailure": {
+            "Type": "Task",
+            "Resource": "arn:${partition}:states:::sns:publish",
+            "Parameters": {
+              "TopicArn": "${topic_arn}",
+              "Subject.$": "States.Format('[${name_prefix}] hunt FAILED: {}', $.name)",
+              "Message.$": "States.JsonToString($.alert)"
+            },
+            "End": true
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}

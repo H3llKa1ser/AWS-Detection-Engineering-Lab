@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0: Scheduled hunts
+
+### Added
+- `modules/scheduled-hunts`: EventBridge Scheduler (daily, fixed UTC time) ->
+  Step Functions Standard workflow (`statemachine.asl.json.tftpl`) using native
+  Athena and SNS integrations: fetch each saved query, run it, alert only on
+  findings or failures. No Lambda code.
+- Scheduled variants of hunts (`scheduled/...` named queries) built from
+  `scheduled_wrapper.sql.tftpl`: report only rows from the 24h window ending one
+  hour before the run, so each finding is reported once; `findings_total`
+  carries the full count. Hunts declare `schedule-time-column` and
+  `schedule-baseline` in their SQL headers.
+- JSON alerts with ATT&CK mapping, total, sample rows, execution ID and results
+  path; per-hunt failure alerts; run-failure alarm and a two-day dead man's
+  switch on successful runs.
+- `tests/scheduled/test_state_machine.py` (ASL data-flow interpreter with
+  API-shaped mocks) and scheduled-variant tests in `tests/hunts/` (window
+  behaviour, exactly-once reporting across consecutive runs).
+- Root variables `enable_scheduled_hunts`, `scheduled_hunts` (10 by default),
+  `hunt_schedule_hour`, `hunt_schedule_timezone`; outputs
+  `run_scheduled_hunts_now` and `scheduled_hunts`.
+
+### Changed
+- Hunt 10 also returns `last_read` (a timestamp) so it can be scheduled.
+- Hunter IAM policy also allows `athena:GetDataCatalog` on the default catalog
+  (required by the Step Functions Athena integration).
+- README cost section restructured into per-layer notes.
+
 ## 0.5.0: Threat hunting with Athena
 
 ### Added

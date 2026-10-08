@@ -1,9 +1,12 @@
 -- title: Secret and decrypted-parameter harvesting
 -- attack: T1555.006 Credentials from Password Stores: Cloud Secrets Management Stores
 -- purpose: Identities that read 5+ distinct Secrets Manager secrets or decrypted SSM parameters in one day, with how many reads were denied.
+-- schedule-time-column: last_read
+-- schedule-baseline: false
 WITH reads AS (
   SELECT
     coalesce(useridentity.arn, useridentity.principalid) AS identity,
+    from_iso8601_timestamp(eventtime) AS ts,
     date_trunc('day', from_iso8601_timestamp(eventtime)) AS day,
     coalesce(
       json_extract_scalar(requestparameters, '$.secretId'),
@@ -28,6 +31,7 @@ SELECT
   count(DISTINCT secret) AS distinct_secrets,
   count(*) AS reads,
   count_if(errorcode IS NOT NULL) AS denied,
+  max(ts) AS last_read,
   array_agg(DISTINCT sourceipaddress) AS source_ips,
   array_agg(DISTINCT secret) AS secrets
 FROM reads

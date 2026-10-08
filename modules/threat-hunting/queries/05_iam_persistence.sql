@@ -1,6 +1,8 @@
 -- title: IAM persistence (credentials, users, admin grants, trust changes)
 -- attack: T1098.001 Additional Cloud Credentials / T1136.003 Create Account: Cloud Account / T1098.003 Additional Cloud Roles
 -- purpose: Successful IAM changes used to keep access, ranked so keys or passwords created for someone else and AdministratorAccess grants come first.
+-- schedule-time-column: ts
+-- schedule-baseline: false
 WITH changes AS (
   SELECT
     from_iso8601_timestamp(eventtime) AS ts,

@@ -87,3 +87,13 @@ output "saved_hunts" {
   description = "Saved hunt => MITRE ATT&CK mapping."
   value       = var.enable_threat_hunting ? module.threat_hunting[0].saved_hunts : null
 }
+
+output "scheduled_hunts" {
+  description = "When the scheduled hunts run and which ones (null when disabled)."
+  value       = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].schedule : null
+}
+
+output "run_scheduled_hunts_now" {
+  description = "CLI command to run the scheduled hunts immediately with the schedule's own input."
+  value       = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].run_now : null
+}

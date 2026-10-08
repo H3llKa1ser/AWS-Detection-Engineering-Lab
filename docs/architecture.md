@@ -252,3 +252,75 @@ parsed from the module, a meta-test fails if a query has no test, and the suite
 has been mutation-checked (removing a key exclusion from a query makes its test
 fail). Limits: it does not exercise Athena itself (partition-projection pruning,
 JsonSerDe parsing of real files, Trino-specific function edge cases).
+
+## Scheduled hunts
+
+### Flow
+
+EventBridge Scheduler starts a Standard Step Functions workflow daily at a fixed
+time (flexible window off). Its input lists the scheduled hunts by named-query
+ID. A Map state runs them two at a time; for each one:
+
+1. `athena:getNamedQuery` (AWS SDK integration) fetches the saved SQL, so the
+   schedule always runs exactly what is saved in the workgroup;
+2. `athena:startQueryExecution.sync` runs it and waits;
+3. `athena:getQueryResults` reads the header plus up to 5 rows;
+4. a Choice state treats more than one row (the header) as findings, and an SNS
+   publish sends a JSON alert; a clean hunt ends silently.
+
+Any error in steps 1-3 is caught per hunt and turned into a "FAILED" alert, so
+one broken hunt never hides the others. The Map discards per-hunt state
+(`ResultPath: null`) to stay far from the 256 KB state-size limit.
+
+### Reporting windows
+
+A saved hunt answers "what in the last 30 days?"; a daily alert must answer
+"what is new since yesterday?". The scheduled variant
+(`modules/threat-hunting/scheduled_wrapper.sql.tftpl`) wraps the hunt and keeps
+rows whose declared time column falls in `[run - 25h, run - 1h)`:
+
+- **Contiguous, non-overlapping.** Daily runs at a fixed UTC time produce windows
+  that touch end to end, so each finding is reported once. Pick UTC for the
+  schedule: a DST timezone makes some days 23 or 25 hours long.
+- **Lagged.** CloudTrail typically delivers within minutes but not instantly.
+  The one-hour lag means an event is judged after it has had time to arrive; one
+  inside the lag is reported by the next run, not lost.
+- **Right-sized scans.** Non-baseline hunts read only the last 2 days of
+  partitions. Baseline hunts (new IP, new region, new role path) keep the full
+  lookback because "new" needs history, with a 2-day "recent" span so the window
+  is fully covered.
+- **Full count.** The wrapper adds `findings_total` (a window count) as the
+  first column, so an alert showing 5 sample rows still states the total.
+
+Each hunt declares its time column and whether it needs a baseline in its SQL
+header. A hunt without them (the access-key pivot) cannot be scheduled: a
+precondition stops the plan.
+
+### Trusting silence
+
+A scheduled detector that only speaks when it finds something is
+indistinguishable from a broken one. Two alarms close that gap:
+`ExecutionsFailed` (the run broke) and a dead man's switch on
+`ExecutionsSucceeded` (no successful run on two consecutive UTC days, with
+missing data treated as breaching). Two days rather than one avoids a false
+alarm on the day you deploy, before the first run.
+
+### Least privilege
+
+The state machine role has the hunter policy (query the workgroup, read-only on
+CloudTrail, use the lab key) plus `sns:Publish` on the alert topic. The scheduler
+role can only start this state machine. Both trust policies pin
+`aws:SourceAccount`.
+
+### Tests
+
+`tests/scheduled/test_state_machine.py` runs the rendered definition through a
+small interpreter for the ASL features it uses, with mocks shaped like the real
+Athena/SNS responses. It covers findings, a clean run, a failed hunt alongside a
+healthy one, and Map output size. Unresolvable JSONPaths fail as they would in
+AWS. `tests/hunts/` checks that each scheduled variant finds the same attacks as
+its hunt inside the window, nothing two days later, and that across two
+consecutive runs every event is reported exactly once. Both suites were
+mutation-checked, and the Terraform-rendered scheduled SQL was compared
+byte-for-byte with the tests' rendering. Schema validation of the definition:
+`npx asl-validator` (see docs/validation.md).

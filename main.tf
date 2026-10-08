@@ -189,9 +189,33 @@ module "threat_hunting" {
   lookback_days          = var.hunting_lookback_days
   recent_days            = var.hunting_recent_days
   bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
+  scheduled_hunts        = var.enable_scheduled_hunts ? var.scheduled_hunts : []
 }
 
-# 9. Optional traffic generator that exercises the DNS detections.
+# 9. Scheduled hunts: run selected saved hunts daily, alert only on findings.
+module "scheduled_hunts" {
+  source = "./modules/scheduled-hunts"
+  count  = var.enable_threat_hunting && var.enable_scheduled_hunts && length(var.scheduled_hunts) > 0 ? 1 : 0
+
+  name_prefix       = var.name_prefix
+  account_id        = local.account_id
+  partition         = local.partition
+  hunts             = module.threat_hunting[0].scheduled_hunts
+  workgroup_name    = module.threat_hunting[0].workgroup
+  hunter_policy_arn = module.threat_hunting[0].hunter_policy_arn
+  alert_topic_arn   = module.alerting.alert_topic_arn
+  schedule_hour     = var.hunt_schedule_hour
+  schedule_timezone = var.hunt_schedule_timezone
+}
+
+check "scheduled_hunts_need_hunting" {
+  assert {
+    condition     = !var.enable_scheduled_hunts || var.enable_threat_hunting
+    error_message = "enable_scheduled_hunts has no effect unless enable_threat_hunting = true."
+  }
+}
+
+# 10. Optional traffic generator that exercises the DNS detections.
 module "traffic_generator" {
   source = "./modules/traffic-generator"
   count  = var.deploy_traffic_generator && var.create_lab_vpc ? 1 : 0
@@ -208,7 +232,7 @@ check "traffic_generator_needs_lab_vpc" {
   }
 }
 
-# 10. Optional automated response to high-signal GuardDuty findings.
+# 11. Optional automated response to high-signal GuardDuty findings.
 module "response" {
   source = "./modules/response"
   count  = var.enable_response_automation ? 1 : 0

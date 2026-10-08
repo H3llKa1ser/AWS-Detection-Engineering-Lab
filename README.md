@@ -25,6 +25,7 @@ architecture and infrastructure-as-code in one repo.
 | **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists, custom block/allow lists, and DNS Firewall Advanced (DGA, dictionary DGA, tunnelling) | Prevention: known-bad domains *and* never-seen-before DGA/tunnelling traffic get no answer; every verdict is logged |
 | **Detection-as-code** | 26 metric-filter alarms over CloudTrail, flow and DNS logs, plus 3 EventBridge-driven alarms for DNS Firewall Advanced | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
 | **Threat hunting** | Glue table over the CloudTrail bucket (partition projection), Athena workgroup, 14 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-event joins |
+| **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch | 10 hunts run daily over the last 24h; alerts only on findings or failures, each finding once |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -58,6 +59,8 @@ flowchart LR
     EB -->|MatchedEvents alarms| SNS
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
     S3 -->|read in place| ATH[Athena + Glue<br/>14 saved hunts]
+    SCH[Scheduler, daily] --> SFN[Step Functions] -->|scheduled variants| ATH
+    SFN -->|findings / failures| SNS
 
     CFG --> SH
     GD --> EB{EventBridge}
@@ -260,6 +263,42 @@ To run a hunt: open Athena, switch to the `<prefix>-threat-hunting` workgroup,
 aws athena list-named-queries --work-group detlab-threat-hunting
 ```
 
+### Scheduled hunts
+
+Hunts nobody runs find nothing. Ten of them run every day at 06:00 UTC (choose
+with `scheduled_hunts`, `hunt_schedule_hour`), and the alert topic hears about it
+only when one returns rows or fails to run. Three design decisions keep that
+signal clean:
+
+- **Each finding is reported once.** A saved hunt looks back 30 days, so running
+  it daily as-is would re-send the same finding for a month. Each scheduled hunt
+  is a *scheduled variant* (saved alongside the originals as `scheduled/...`) that
+  wraps the hunt and keeps only rows whose time falls in the 24 hours ending one
+  hour before the run. Consecutive daily windows touch but never overlap; the
+  one-hour lag gives CloudTrail time to deliver late events, which are then
+  reported the next day rather than missed. Each hunt declares its time column
+  in its header (`-- schedule-time-column:`); baseline hunts keep their full
+  history so "new" still means new.
+- **Alerts are actionable.** Each one is JSON with the hunt, ATT&CK mapping, the
+  full `findings_total`, up to 5 sample rows, the query execution ID and the S3
+  path of the complete results. A hunt that fails (scan cap, permissions) sends
+  its own "FAILED" alert, and the others still run.
+- **Silence is trustworthy.** If the whole run fails, an alarm fires. If no run
+  succeeds on two consecutive days, a dead man's switch fires. Without it, a
+  scheduler that quietly stopped would look exactly like a clean week.
+
+Step Functions runs the *saved* queries through its native Athena and SNS
+integrations: no Lambda code, and the schedule runs exactly what a hunter sees
+in the workgroup. It uses the hunter IAM policy plus `sns:Publish`, nothing more.
+Hunts 04, 10 and 11 are not scheduled by default: they usually need tuning for
+your environment first (CSPM tools, apps reading many secrets, NAT changes).
+
+Run the schedule now, with its exact input:
+
+```bash
+$(terraform output -raw run_scheduled_hunts_now)
+```
+
 ## Prerequisites
 
 - Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
@@ -303,8 +342,12 @@ aws ec2 create-security-group --group-name detlab-test --description test
 #    Advanced rules; that part is best effort, see docs/validation.md
 terraform apply -var deploy_traffic_generator=true
 
-# 4. Prove the threat-hunting queries work, offline, no AWS needed
-pip install -r tests/hunts/requirements.txt && python3 tests/hunts/test_hunts.py
+# 4. Prove the threat-hunting queries and the scheduler work, offline, no AWS needed
+pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
+python3 tests/hunts/test_hunts.py && python3 tests/scheduled/test_state_machine.py
+
+# 5. Run the scheduled hunts now instead of waiting for 06:00 UTC
+$(terraform output -raw run_scheduled_hunts_now)
 ```
 
 For adversary emulation that produces *real* (not sample) findings, point
@@ -313,22 +356,29 @@ e.g. `stratus detonate aws.credential-access.ec2-get-password-data`.
 
 ## Cost
 
-The lab is designed to be cheap but **is not free**. Rough monthly order of
-magnitude in an idle sandbox: CloudTrail management events (free for the first
-copy), GuardDuty and Security Hub bill on events/findings analysed, Config bills
-per configuration item recorded and per rule evaluation. Flow logs and DNS query
-logs bill on CloudWatch Logs ingestion: negligible on the empty lab VPC, but
-budget for it before adding a busy VPC to `monitored_vpc_ids`. The lab VPC
-itself is free (no NAT gateway); the opt-in traffic generator is one t3.micro.
-DNS Firewall bills on queries inspected and on domains held in your own lists;
-the AWS-managed lists carry no charge of their own. DNS Firewall Advanced is
-priced separately per query inspected; check the Route 53 pricing page before
-enabling it on a busy VPC. Athena bills per byte scanned: every saved hunt filters on the
-day partition, and the workgroup cancels any query past
-`hunting_bytes_scanned_cutoff` (10 GiB by default), so a mistaken unfiltered
-query cannot run up a bill. Idle, the hunting layer costs nothing. Expect **single-digit
-to low-tens of USD/month** idle; more if you generate heavy activity. Destroy
-when you are done.
+The lab is designed to be cheap but **is not free**. Expect **single-digit to
+low-tens of USD/month** idle in a sandbox, more if you generate heavy activity.
+Destroy it when you are done.
+
+- **Core:** CloudTrail management events are free for the first copy. GuardDuty
+  and Security Hub bill on events and findings analysed; Config bills per
+  configuration item recorded and per rule evaluation.
+- **Network telemetry:** flow logs and DNS query logs bill on CloudWatch Logs
+  ingestion. That is negligible on the empty lab VPC, but budget for it before
+  adding a busy VPC to `monitored_vpc_ids`. The lab VPC itself is free (no NAT
+  gateway); the opt-in traffic generator is one t3.micro.
+- **DNS Firewall** bills on queries inspected and on domains in your own lists;
+  the AWS-managed lists carry no charge of their own. **DNS Firewall Advanced**
+  is priced separately per query inspected; check the Route 53 pricing page
+  before enabling it on a busy VPC.
+- **Athena** bills per byte scanned. Every saved hunt filters on the day
+  partition, and the workgroup cancels any query past
+  `hunting_bytes_scanned_cutoff` (10 GiB by default), so a mistaken unfiltered
+  query cannot run up a bill. Ad-hoc hunting costs nothing when idle.
+- **Scheduled hunts** run daily: most scan only the last 2 days of CloudTrail;
+  the three baseline hunts (01, 07, 13) scan the full lookback. Step Functions
+  (about 10 state transitions per hunt) and EventBridge Scheduler costs are
+  negligible at one run a day.
 
 ## Clean up
 
@@ -356,9 +406,11 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── detections/        # detection-as-code catalogue (metric filters)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql)
+│   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
 │   ├── response/          # opt-in Lambda auto-response
 │   └── traffic-generator/ # opt-in DNS traffic generator instance
-├── tests/hunts/           # behavioural tests for the hunt queries (DuckDB, no AWS)
+├── tests/hunts/           # behavioural tests for the hunt queries and their scheduled variants (DuckDB, no AWS)
+├── tests/scheduled/       # data-flow tests for the scheduled-hunts state machine (no AWS)
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
 ```
@@ -369,7 +421,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] Route 53 Resolver DNS Firewall with managed threat domain lists (block, not just detect)
 - [x] DNS Firewall Advanced (native DGA, dictionary-DGA and DNS-tunnelling rules), via `hashicorp/aws` 6.x
 - [x] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries (14 tested hunts)
-- [ ] Scheduled hunts: run selected saved queries daily and alert on non-empty results
+- [x] Scheduled hunts: run selected saved queries daily and alert on non-empty results (once per finding, with a dead man's switch)
 - [ ] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)

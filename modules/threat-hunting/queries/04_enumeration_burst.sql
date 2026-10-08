@@ -1,6 +1,8 @@
 -- title: Rapid enumeration across many services
 -- attack: T1580 Cloud Infrastructure Discovery / T1526 Cloud Service Discovery / T1087.004 Account Discovery: Cloud Account
 -- purpose: Identities that made 30+ distinct List/Describe/Get calls across 5+ services in one hour, the footprint of Pacu, ScoutSuite or an attacker orienting.
+-- schedule-time-column: hour
+-- schedule-baseline: false
 -- AWS services acting for you (Config, Security Hub, the console's own lookups) report a *.amazonaws.com source and are excluded. CSPM tools you run will still appear: allow-list them by identity.
 SELECT
   useridentity.arn AS identity,

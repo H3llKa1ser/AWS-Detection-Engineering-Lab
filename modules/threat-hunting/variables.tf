@@ -40,3 +40,15 @@ variable "results_retention_days" {
   type    = number
   default = 30
 }
+
+variable "scheduled_hunts" {
+  description = "Hunts to save as scheduled variants (file names without .sql). Each must declare schedule-time-column in its header."
+  type        = list(string)
+  default     = []
+}
+
+variable "schedule_lag_hours" {
+  description = "Hours the scheduled window ends before the run, to allow for CloudTrail delivery delay."
+  type        = number
+  default     = 1
+}

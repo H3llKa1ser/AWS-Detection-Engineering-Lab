@@ -156,6 +156,36 @@ To see a hunt fire for real, run one of the Level 2 actions (for example
 access key for a test user from another user and check hunt 05 the next time
 CloudTrail delivers (typically within 5-15 minutes).
 
+## Scheduled hunts
+
+### Offline (no AWS)
+
+```bash
+pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
+python3 tests/hunts/test_hunts.py              # 20/20: hunts + scheduled variants
+python3 tests/scheduled/test_state_machine.py  # 5/5: state machine data flow
+
+# Schema-validate the state machine definition, rendered as the tests render it (Node.js):
+python3 -c "import json,sys; sys.path.insert(0,'tests/scheduled'); import test_state_machine as t; print(json.dumps(t.render()))" > /tmp/hunts.asl.json
+npx asl-validator --json-path /tmp/hunts.asl.json
+```
+
+### In the account
+
+1. Trigger an event a scheduled hunt watches, e.g. create an access key for a
+   test user *from another user* (hunt 05) or call
+   `aws guardduty create-ip-set ...` (hunt 06). Wait about 15 minutes for
+   CloudTrail delivery, plus the one-hour lag.
+2. Run the schedule now: `$(terraform output -raw run_scheduled_hunts_now)`.
+3. Expect one `[detlab] hunt findings: ...` email per hunt with findings, and
+   nothing for clean hunts. Running it again the same day re-reports the same
+   window (manual runs are not de-duplicated; the daily schedule is).
+4. To see a failure alert, temporarily set `hunting_bytes_scanned_cutoff` to
+   the 10 MB minimum and run a baseline hunt.
+5. To test the dead man's switch without waiting two days, disable the schedule
+   (`aws scheduler update-schedule ... --state DISABLED`) and watch
+   `detlab-scheduled_hunts_not_running` go to ALARM after the second empty day.
+
 ## Level 3 — Adversary emulation (real findings)
 
 Use [Stratus Red Team](https://github.com/DataDog/stratus-red-team) for genuine

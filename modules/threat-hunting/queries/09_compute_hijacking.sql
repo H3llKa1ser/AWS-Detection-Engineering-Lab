@@ -1,6 +1,8 @@
 -- title: GPU, accelerated or very large instances launched (cryptomining shape)
 -- attack: T1496 Resource Hijacking
 -- purpose: RunInstances requests for GPU/accelerator families, metal or 12xlarge+ sizes, or 5+ instances at once, including failures, since quota errors are a signal too.
+-- schedule-time-column: ts
+-- schedule-baseline: false
 WITH launches AS (
   SELECT
     from_iso8601_timestamp(eventtime) AS ts,
