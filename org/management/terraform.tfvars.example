@@ -1,0 +1,4 @@
+management_account_id      = "111111111111"
+delegated_admin_account_id = "222222222222" # security tooling account
+home_region                = "eu-west-1"
+regions                    = ["eu-west-1", "eu-central-1", "us-east-1"]

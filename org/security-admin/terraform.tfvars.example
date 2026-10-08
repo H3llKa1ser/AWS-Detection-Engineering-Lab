@@ -1,0 +1,5 @@
+delegated_admin_account_id = "222222222222"
+home_region                = "eu-west-1"
+regions                    = ["eu-west-1", "eu-central-1", "us-east-1"]
+policy_targets             = ["r-abcd"] # organization root; or specific OUs
+alert_email                = "security@example.com"
