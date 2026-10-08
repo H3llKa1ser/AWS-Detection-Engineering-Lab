@@ -189,6 +189,31 @@ its synthetic patterns cross their thresholds depends on timing (hunt 15 needs
 12+ evenly spaced lookups of one name, which the generator's 15-minute cycle
 produces after about 3 hours).
 
+## Threat intelligence
+
+### Offline (no AWS)
+
+```bash
+python3 tests/intel/test_indicators.py   # curation rules, merge mirror, importer
+python3 tests/hunts/test_hunts.py         # includes intel hunts and the canary end to end
+```
+
+### In the account
+
+1. After `terraform apply`, `terraform output threat_intel` shows the table and
+   indicator counts per source.
+2. The first upload already triggered a retro-hunt: the Step Functions console
+   shows an execution started by EventBridge, running `retro/22..24`.
+3. With the traffic generator running, hunt 23 finds
+   `beacon.intel-canary.invalid` (matched by the canary indicator
+   `intel-canary.invalid`) once DNS logs reach the lake. In the daily run it
+   arrives as `hunt findings: 23_intel_dns_matches`.
+4. To watch a retro-hunt fire: add a test indicator for something you know
+   happened in the last 30 days (for example the public IP you ran the CLI from,
+   as an `ipv4` row with a short expiry), apply, and expect
+   `hunt findings: retro/24_intel_cloudtrail_source_ip`. Remove the row
+   afterwards.
+
 ## Scheduled hunts
 
 ### Offline (no AWS)

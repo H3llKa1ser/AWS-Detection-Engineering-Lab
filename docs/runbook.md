@@ -278,3 +278,37 @@ If a network hunt returns nothing for days on a busy VPC, check delivery before
 trusting the silence (see "Network log lake" in validation.md): Firehose
 conversion errors, the `LogDeliveryEnabled` tag, and the S3 flow log's
 delivery status.
+
+## Threat-intel hunts
+
+**22 Intel: flows.** Start with `accepted` egress rows: something inside talked
+to known-bad infrastructure. An ingress row next to an egress row for the same
+IP is usually reply traffic. Check the indicator's `confidence` and
+`description`, then run 21 on the instance. Rejected ingress from a bad IP is
+mostly noise unless something was also accepted.
+
+**23 Intel: DNS.** `matched_on = domain` means the name itself is known-bad;
+`answer <ip>` means a different name resolved to known-bad infrastructure (shared
+hosting, or a fresh domain on old C2). `dns_firewall` shows whether it was
+already blocked: a block stopped the lookup, not the malware that made it.
+
+**24 Intel: CloudTrail.** Valid credentials used from known-bad infrastructure.
+Treat as compromise: deactivate the access key or revoke the session, rotate,
+then investigate with 14. Count `succeeded`, not just calls.
+
+**retro/<hunt> alerts** come from a change to the indicator set and cover the
+full lookback. They may include activity from weeks ago: scope the incident to
+that whole period.
+
+### Curating indicators
+
+1. Add rows to a file in `intel/indicators/` (or run `scripts/import_feodo.py`).
+2. `python3 tests/intel/test_indicators.py` and fix anything it reports.
+3. Open a pull request with the source and reasoning; merge; `terraform apply`.
+   The retro-hunt starts on its own.
+4. Monthly, run hunt 25 and prune or re-verify what is expiring or expired.
+
+**False positive?** Lower the indicator's confidence, shorten its expiry, or
+remove it, with the reason in the pull request. Do not keep a known-false
+indicator around to "watch" it: that is what ALERT-mode DNS Firewall lists are
+for.

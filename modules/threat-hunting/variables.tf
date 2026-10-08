@@ -74,3 +74,14 @@ variable "network_logs_bucket_arn" {
   type        = string
   default     = null
 }
+
+variable "intel_table" {
+  type    = string
+  default = "threat_indicators"
+}
+
+variable "intel_bucket_arn" {
+  description = "Threat-intel bucket the hunter may read (null when intel is not deployed)."
+  type        = string
+  default     = null
+}

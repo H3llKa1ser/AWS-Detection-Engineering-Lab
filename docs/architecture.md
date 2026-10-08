@@ -385,3 +385,54 @@ and look-alikes; a mutation round removed each exclusion and join condition in
 turn and every removal failed its test. The round also found an exclusion in
 hunt 15 (`*.amazon.com`) that no fixture exercised and nothing justified; it
 was removed.
+
+## Threat intelligence
+
+### Indicators as code
+
+`intel/indicators/*.csv` is the only place indicators come from. Every change
+is reviewed in a pull request and validated by `tests/intel/test_indicators.py`;
+Terraform repeats the essential checks (types, enums, dates, internal ranges,
+CIDR width, platform apex domains, duplicates) as preconditions, so an invalid
+set fails the plan instead of reaching the table. Expiry is mandatory: stale
+infrastructure indicators are the classic intel false positive, and an expired
+row simply stops matching.
+
+### Publication
+
+The module merges all files, normalises case and whitespace, sorts by
+`type|indicator` and writes one quoted CSV to
+`s3://<intel-bucket>/indicators/indicators.csv` (versioned, KMS). The Glue table
+`threat_indicators` reads it with OpenCSVSerde, all columns as strings. One
+sorted object gives two properties: one upload per real change, and no upload
+for cosmetic edits. A test proves the Python mirror of this merge produces the
+same bytes as Terraform.
+
+### Matching
+
+`modules/threat-hunting/intel_active.sql.tftpl` is a shared CTE, injected into
+hunts 22-24 at render time. It drops expired rows and turns every IPv4 or CIDR
+indicator into an integer range `[lo, hi]` (aligning a misaligned CIDR base), so
+flow endpoints, DNS answer IPs and CloudTrail source IPs are matched with one
+`BETWEEN`. Domain indicators match exact names and subdomains on a dot boundary
+(implemented with `reverse()`/`strpos`, which behaves the same in Athena and in
+the test engine). These are range and suffix joins against a small table:
+fine for a curated list of hundreds or thousands; a feed of millions would
+call for a different design (equi-joins on exact IPs, pre-expanded ranges).
+
+### Retro-hunting
+
+The daily run only reports the last 24 hours, so an indicator added today would
+never be checked against last week. The intel bucket sends object events to
+EventBridge; a rule matching `Object Created` on the indicator object starts the
+scheduled-hunts state machine with `retro/...` variants of 22-24: the full hunt
+wrapped to add `findings_total`, so alerts work the same way. The rule is
+created before the first upload. A test proves a 10-day-old match is found by
+the retro variant and ignored by the daily one.
+
+### Recommended schedule
+
+`scheduled_hunts = null` resolves to a recommended set computed from what is
+deployed (CloudTrail always; network hunts with the lake; intel hunts with
+intel). Every combination of optional layers was checked to recommend only
+hunts whose tables exist.

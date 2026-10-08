@@ -39,3 +39,12 @@ output "workgroup_arn" {
 output "schedulable_hunts" {
   value = sort(keys(local.schedulable))
 }
+
+output "retro_hunts" {
+  description = "Retro-hunt variants of the intel hunts, re-run whenever the indicator set changes."
+  value = { for k, q in aws_athena_named_query.retro : k => {
+    named_query_id = q.id
+    title          = local.retro[k].title
+    attack         = local.retro[k].attack
+  } }
+}

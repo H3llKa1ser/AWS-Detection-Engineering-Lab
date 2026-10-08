@@ -219,6 +219,40 @@ def test_scheduler_input_shape_matches_module():
     assert referenced <= {"name", "title", "attack", "namedQueryId"}, referenced
 
 
+def _matches(pattern, event):
+    """EventBridge matching for the subset used here: exact values in lists, nested objects."""
+    for k, v in pattern.items():
+        if isinstance(v, dict):
+            if not isinstance(event.get(k), dict) or not _matches(v, event[k]):
+                return False
+        elif event.get(k) not in v:
+            return False
+    return True
+
+
+def test_retro_trigger_matches_only_the_indicator_object():
+    src = (ROOT / "modules" / "scheduled-hunts" / "main.tf").read_text()
+    assert 'source      = ["aws.s3"]' in src and 'detail-type = ["Object Created"]' in src
+    pattern = {"source": ["aws.s3"], "detail-type": ["Object Created"],
+               "detail": {"bucket": {"name": ["detlab-threat-intel"]}, "object": {"key": ["indicators/indicators.csv"]}}}
+    event = {"version": "0", "source": "aws.s3", "detail-type": "Object Created", "account": "111122223333",
+             "detail": {"version": "0", "bucket": {"name": "detlab-threat-intel"},
+                        "object": {"key": "indicators/indicators.csv", "size": 512, "etag": "x"},
+                        "reason": "PutObject"}}
+    assert _matches(pattern, event)
+    assert not _matches(pattern, dict(event, detail={**event["detail"], "object": {"key": "indicators/other.csv"}}))
+    assert not _matches(pattern, dict(event, **{"detail-type": "Object Deleted"}))
+
+
+def test_retro_run_alerts_like_a_scheduled_run():
+    """Retro input reuses the machine: names carry the retro/ prefix into the alert."""
+    calls = []
+    retro_input = {"hunts": [{"name": "retro/22_intel_flow_matches", "title": "Intel flows", "attack": "TA0011",
+                              "namedQueryId": "nq-22"}]}
+    run_states(render(), retro_input, make_mocks({"nq-22": ["198.51.100.9"]}), calls)
+    assert [p["Subject"] for p in publishes(calls)] == ["[detlab] hunt findings: retro/22_intel_flow_matches"]
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

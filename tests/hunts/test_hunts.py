@@ -17,6 +17,8 @@ What this proves: query logic (joins, windows, thresholds, exclusions) and
 column/field references. What it cannot prove: Athena-specific behaviour such
 as partition-projection pruning, or exact Trino function edge cases.
 """
+import csv
+import io
 import json
 import pathlib
 import re
@@ -31,7 +33,8 @@ import sqlglot
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE = ROOT / "modules" / "threat-hunting"
 LAKE = ROOT / "modules" / "network-log-lake"
-DB, TABLE, FLOW, DNS = "detlab_security", "cloudtrail", "vpc_flow_logs", "resolver_query_logs"
+INTEL_MODULE = ROOT / "modules" / "threat-intel"
+DB, TABLE, FLOW, DNS, INTEL = "detlab_security", "cloudtrail", "vpc_flow_logs", "resolver_query_logs", "threat_indicators"
 ACCT = "111122223333"
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 BASELINE = NOW - timedelta(days=10)
@@ -98,7 +101,15 @@ def lake_schema(list_name):
     return cols + [("dt", "string")]
 
 
-SCHEMAS = {TABLE: module_schema, FLOW: lambda: lake_schema("flow_columns"), DNS: lambda: lake_schema("dns_columns")}
+def intel_schema():
+    """String columns of the threat_indicators table in modules/threat-intel/main.tf."""
+    src = (INTEL_MODULE / "main.tf").read_text()
+    cols = re.findall(r'"(\w+)"', re.search(r"columns = \[([^\]]+)\]", src).group(1))
+    return [(c, "string") for c in cols]
+
+
+SCHEMAS = {TABLE: module_schema, FLOW: lambda: lake_schema("flow_columns"), DNS: lambda: lake_schema("dns_columns"),
+           INTEL: intel_schema}
 
 
 # --- Rendering: same substitutions Terraform's templatefile() makes ----------
@@ -110,9 +121,15 @@ def _fill(template, values):
     return template
 
 
+def intel_active():
+    """Mirror of local.intel_active in modules/threat-hunting/main.tf."""
+    return _fill((MODULE / "intel_active.sql.tftpl").read_text(), {"database": DB, "intel_table": INTEL}).strip()
+
+
 def render_athena(name, lookback_days=30, recent_days=1):
     return _fill((MODULE / "queries" / f"{name}.sql").read_text(),
                  {"database": DB, "table": TABLE, "flow_table": FLOW, "dns_table": DNS,
+                  "intel_table": INTEL, "intel_active": intel_active(),
                   "lookback_days": lookback_days, "recent_days": recent_days})
 
 
@@ -135,6 +152,15 @@ def render_scheduled_athena(name):
     return _fill((MODULE / "scheduled_wrapper.sql.tftpl").read_text(), {
         "name": name, "time_column": header(name, "schedule-time-column"),
         "start_hours": 24 + LAG_HOURS, "end_hours": LAG_HOURS, "inner": inner})
+
+
+def render_retro_athena(name):
+    """Mirror of local.retro in modules/threat-hunting/main.tf."""
+    return _fill((MODULE / "retro_wrapper.sql.tftpl").read_text(), {"name": name, "inner": render_athena(name).strip()})
+
+
+def retro_hunts():
+    return [n for n in schedulable() if "intel" in (header(n, "requires") or "")]
 
 
 def render_scheduled(name):
@@ -204,6 +230,14 @@ def dns(at, instance, name, qtype="A", rcode="NOERROR", answers=(), firewall=Non
             "srcids": {"instance": instance, "resolver_endpoint": None},
             "firewall_rule_action": firewall, "firewall_rule_group_id": None, "firewall_domain_list_id": None,
             "dt": at.strftime("%Y/%m/%d")}
+
+
+FAR = "2099-12-31"
+
+
+def ind(indicator, kind, *, source="test-feed", confidence="high", expires=FAR, added="2026-10-01", description="bad"):
+    return {"__table": INTEL, "indicator": indicator, "type": kind, "source": source, "confidence": confidence,
+            "added": added, "expires": expires, "description": description, "reference": ""}
 
 
 def run(name, events, **render_kw):
@@ -520,11 +554,89 @@ def test_21_investigate_instance():
     assert rows[1]["outcome"] == "BLOCK" and "8443" in rows[2]["detail"] and "4096 bytes" in rows[2]["detail"], rows
 
 
+YESTERDAY = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def test_22_intel_flow_matches():
+    rows = run("22_intel_flow_matches", [
+        ind("203.0.113.50", "ipv4", confidence="high"),
+        ind("198.51.100.0/28", "cidr", confidence="medium"),          # .0 - .15
+        ind("192.0.2.10", "ipv4", expires=YESTERDAY),                  # expired
+        flow(RECENT, "10.42.1.10", "203.0.113.50", 443, instance="i-0a", nbytes=5000),
+        flow(RECENT, "10.42.1.11", "198.51.100.15", 8080, instance="i-0b"),        # last address in range
+        flow(RECENT, "198.51.100.0", "10.42.1.12", 22, instance="i-0c", direction="ingress", action="REJECT"),
+        flow(RECENT, "10.42.1.11", "198.51.100.16", 443, instance="i-0b"),         # first address outside
+        flow(RECENT, "10.42.1.13", "192.0.2.10", 443, instance="i-0d"),            # expired indicator
+        flow(RECENT, "10.42.1.13", "203.0.113.51", 443, instance="i-0d"),          # neighbour, no match
+    ])
+    got = {(r["instance_id"], r["remote_ip"], r["direction"], r["indicator"]) for r in rows}
+    assert got == {("i-0a", "203.0.113.50", "egress", "203.0.113.50"),
+                   ("i-0b", "198.51.100.15", "egress", "198.51.100.0/28"),
+                   ("i-0c", "198.51.100.0", "ingress", "198.51.100.0/28")}, got
+    assert rows[0]["confidence"] == "high", rows                                # high confidence first
+    assert {r["remote_ip"]: r["rejected"] for r in rows}["198.51.100.0"] == 1, rows
+
+
+def test_23_intel_dns_matches():
+    rows = run("23_intel_dns_matches", [
+        ind("evil-c2.net", "domain"), ind("203.0.113.50", "ipv4"), ind("old-bad.org", "domain", expires=YESTERDAY),
+        dns(RECENT, "i-0a", "evil-c2.net", firewall="BLOCK"),                       # exact
+        dns(RECENT, "i-0a", "a.b.evil-c2.net"),                                     # subdomain
+        dns(RECENT, "i-0a", "notevil-c2.net"),                                      # no dot boundary
+        dns(RECENT, "i-0b", "cdn.innocent.com", answers=["203.0.113.50", "203.0.113.9"]),  # answer match
+        dns(RECENT, "i-0b", "other.innocent.com", answers=["203.0.113.99"]),
+        dns(RECENT, "i-0c", "old-bad.org"),                                         # expired
+    ])
+    got = {(r["query_name"], r["matched_on"]) for r in rows}
+    assert got == {("evil-c2.net", "domain"), ("a.b.evil-c2.net", "domain"),
+                   ("cdn.innocent.com", "answer 203.0.113.50")}, got
+    assert {r["query_name"]: r["dns_firewall"] for r in rows}["evil-c2.net"] == ["BLOCK"], rows
+
+
+def test_24_intel_cloudtrail_source_ip():
+    rows = run("24_intel_cloudtrail_source_ip", [
+        ind("198.51.100.5/28", "cidr"),                                             # misaligned base -> .0/28
+        ind("192.0.2.66", "ipv4", confidence="medium"),
+        login(RECENT, user("alice"), "198.51.100.1"),
+        ev("ListBuckets", "s3.amazonaws.com", RECENT, user("bob"), "192.0.2.66", err="AccessDenied"),
+        ev("ListBuckets", "s3.amazonaws.com", RECENT, user("carol"), "198.51.100.17"),   # outside range
+        ev("Decrypt", "kms.amazonaws.com", RECENT, role_session("app", "s"), "s3.amazonaws.com"),  # service caller
+    ])
+    got = {(r["sourceipaddress"], r["indicator"], r["succeeded"]) for r in rows}
+    assert got == {("198.51.100.1", "198.51.100.5/28", 1), ("192.0.2.66", "192.0.2.66", 0)}, got
+    assert rows[0]["confidence"] == "high", rows
+
+
+def test_25_intel_inventory():
+    soon = (NOW + timedelta(days=5)).strftime("%Y-%m-%d")
+    rows = run("25_intel_inventory", [
+        ind("a.example", "domain", source="feed-a"), ind("b.example", "domain", source="feed-a", expires=soon),
+        ind("c.example", "domain", source="feed-a", expires=YESTERDAY), ind("192.0.2.1", "ipv4", source="feed-b"),
+    ])
+    got = {(r["source"], r["type"]): (r["indicators"], r["active"], r["expiring_14d"], r["expired"]) for r in rows}
+    assert got == {("feed-a", "domain"): (3, 2, 1, 1), ("feed-b", "ipv4"): (1, 1, 0, 0)}, got
+
+
+def test_curated_canary_matches_end_to_end():
+    """The repo's real indicator files, merged exactly as Terraform does, must
+    load into the table and let hunt 23 find the traffic generator's canary."""
+    sys.path.insert(0, str(ROOT / "tests" / "intel"))
+    import test_indicators as ti
+    rows = list(csv.DictReader(io.StringIO(ti.merged_csv())))
+    events = [dict(r, __table=INTEL) for r in rows]
+    events.append(dns(RECENT, "i-0gen", "beacon.intel-canary.invalid"))
+    found = run_sql(render("23_intel_dns_matches"), events)
+    assert [(r["query_name"], r["indicator"]) for r in found] == [("beacon.intel-canary.invalid", "intel-canary.invalid")], found
+
+
 def shift(events, delta):
     out = []
     for e in events:
         e = dict(e)
         table = e.get("__table", TABLE)
+        if table == INTEL:          # indicators have no event time
+            out.append(e)
+            continue
         if table == FLOW:
             e["start"] += int(delta.total_seconds())
             e["end"] += int(delta.total_seconds())
@@ -565,6 +677,21 @@ def test_scheduled_window_edges_report_each_event_exactly_once():
     assert not today & tomorrow                       # never twice
 
 
+def test_retro_variants_cover_full_lookback_unlike_scheduled():
+    """Retro runs exist for indicators added after the traffic happened: they must
+    still find a match from 10 days ago, which the daily window ignores."""
+    assert retro_hunts() == ["22_intel_flow_matches", "23_intel_dns_matches", "24_intel_cloudtrail_source_ip"], retro_hunts()
+    for name in retro_hunts():
+        globals()[f"test_{name}"]()
+        old = shift(FIXTURES[name], timedelta(days=-10))
+        full = run_sql(render(name), old)
+        retro = run_sql(sqlglot.transpile(render_retro_athena(name), read="athena", write="duckdb")[0], old)
+        assert len(retro) == len(full) > 0, (name, len(full), len(retro))
+        assert all(r["findings_total"] == len(retro) for r in retro), name
+        assert run_sql(render_scheduled(name), old) == [], name               # the daily window would miss it
+        sqlglot.parse_one(render_retro_athena(name), read="athena", error_level=sqlglot.ErrorLevel.RAISE)
+
+
 def test_scheduled_sql_parses_as_athena():
     for name in schedulable():
         sqlglot.parse_one(render_scheduled_athena(name), read="athena", error_level=sqlglot.ErrorLevel.RAISE)
@@ -572,14 +699,16 @@ def test_scheduled_sql_parses_as_athena():
 
 def test_only_pivots_are_unschedulable():
     unschedulable = {p.stem for p in (MODULE / "queries").glob("*.sql")} - set(schedulable())
-    assert unschedulable == {"14_investigate_access_key", "21_investigate_instance"}, unschedulable
+    assert unschedulable == {"14_investigate_access_key", "21_investigate_instance", "25_intel_inventory"}, unschedulable
 
 
 def test_default_schedule_names_only_schedulable_hunts():
-    src = (ROOT / "variables.tf").read_text()
-    block = re.search(r'variable "scheduled_hunts" \{.*?default = \[(.*?)\]', src, re.S).group(1)
-    defaults = re.findall(r'"([0-9]{2}_[a-z0-9_]+)"', block)
-    assert defaults and set(defaults) <= set(schedulable()), sorted(set(defaults) - set(schedulable()))
+    """Every hunt the root recommends (scheduled_hunts = null) must be schedulable."""
+    src = (ROOT / "main.tf").read_text()
+    block = src[src.index("base_hunts = ["):src.index("scheduled_hunt_list =")]
+    recommended = re.findall(r'"([0-9]{2}_[a-z0-9_]+)"', block)
+    assert len(recommended) == 16, recommended
+    assert set(recommended) <= set(schedulable()), sorted(set(recommended) - set(schedulable()))
 
 
 def test_every_query_has_a_test():

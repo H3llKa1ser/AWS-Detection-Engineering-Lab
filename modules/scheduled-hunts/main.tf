@@ -179,3 +179,80 @@ resource "aws_cloudwatch_metric_alarm" "no_successful_run" {
   alarm_actions       = [var.alert_topic_arn]
   ok_actions          = [var.alert_topic_arn]
 }
+
+# --- Retro-hunts on intel change ---------------------------------------------------------
+# A new indicator should be checked against history, not just tomorrow's
+# traffic. When Terraform uploads a changed indicator set (one object, so one
+# event per change), EventBridge starts this same state machine with the
+# retro-hunt variants (full lookback). Alerts arrive as "hunt findings:
+# retro/<hunt>".
+locals {
+  retro_input = jsonencode({
+    hunts = [for k in sort(keys(var.retro_hunts)) : {
+      name         = "retro/${k}"
+      title        = var.retro_hunts[k].title
+      attack       = var.retro_hunts[k].attack
+      namedQueryId = var.retro_hunts[k].named_query_id
+    }]
+  })
+
+  # S3 "Object Created" event, as delivered to EventBridge.
+  retro_pattern = {
+    source      = ["aws.s3"]
+    detail-type = ["Object Created"]
+    detail = {
+      bucket = { name = [var.intel_bucket_name] }
+      object = { key = [var.intel_object_key] }
+    }
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "retro" {
+  count         = var.enable_retro ? 1 : 0
+  name          = "${var.name_prefix}-retro-hunt-on-intel-change"
+  description   = "Run the intel hunts over the full lookback when the indicator set changes."
+  event_pattern = jsonencode(local.retro_pattern)
+}
+
+data "aws_iam_policy_document" "events_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [var.account_id]
+    }
+  }
+}
+
+resource "aws_iam_role" "retro" {
+  count              = var.enable_retro ? 1 : 0
+  name               = "${var.name_prefix}-retro-hunt-trigger"
+  assume_role_policy = data.aws_iam_policy_document.events_assume.json
+}
+
+resource "aws_iam_role_policy" "retro" {
+  count  = var.enable_retro ? 1 : 0
+  name   = "${var.name_prefix}-retro-hunt-start"
+  role   = aws_iam_role.retro[0].id
+  policy = data.aws_iam_policy_document.scheduler_start.json # states:StartExecution on this machine only
+}
+
+resource "aws_cloudwatch_event_target" "retro" {
+  count     = var.enable_retro ? 1 : 0
+  rule      = aws_cloudwatch_event_rule.retro[0].name
+  target_id = "scheduled-hunts"
+  arn       = aws_sfn_state_machine.hunts.arn
+  role_arn  = aws_iam_role.retro[0].arn
+  input     = local.retro_input
+
+  retry_policy {
+    maximum_retry_attempts       = 3
+    maximum_event_age_in_seconds = 3600
+  }
+}

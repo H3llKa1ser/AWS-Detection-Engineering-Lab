@@ -38,3 +38,29 @@ variable "sample_rows" {
   type        = number
   default     = 5
 }
+
+variable "enable_retro" {
+  description = "Re-run the retro intel hunts whenever the indicator object changes."
+  type        = bool
+  default     = false
+}
+
+variable "retro_hunts" {
+  description = "Retro-hunt variants => {named_query_id, title, attack} from the threat-hunting module."
+  type = map(object({
+    named_query_id = string
+    title          = string
+    attack         = string
+  }))
+  default = {}
+}
+
+variable "intel_bucket_name" {
+  type    = string
+  default = null
+}
+
+variable "intel_object_key" {
+  type    = string
+  default = "indicators/indicators.csv"
+}

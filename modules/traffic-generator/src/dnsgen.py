@@ -17,6 +17,8 @@ Every cycle it produces:
   * the AWS-published test domains for the DNS Firewall managed lists, which
     resolve to 1.2.3.4 when allowed and get the rule's block response when
     blocked
+  * beacon.intel-canary.invalid, a canary in intel/indicators/lab-canaries.csv,
+    so the threat-intel DNS hunt (23) has something real to find
 
 Nothing here contacts a mining pool or Tor: it only asks the resolver for names.
 
@@ -96,6 +98,7 @@ def cycle() -> None:
     query("detlabtest.onion")
     for name in FIREWALL_TEST_DOMAINS:
         query(name)
+    query("beacon.intel-canary.invalid")
 
 
 if __name__ == "__main__":

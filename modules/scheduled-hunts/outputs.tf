@@ -10,3 +10,8 @@ output "run_now" {
   description = "Run the scheduled hunts immediately, with the exact input the schedule uses."
   value       = "aws stepfunctions start-execution --state-machine-arn ${aws_sfn_state_machine.hunts.arn} --input '${local.input}'"
 }
+
+output "retro_trigger" {
+  description = "EventBridge rule that retro-hunts on indicator changes (null when off)."
+  value       = var.enable_retro ? aws_cloudwatch_event_rule.retro[0].name : null
+}

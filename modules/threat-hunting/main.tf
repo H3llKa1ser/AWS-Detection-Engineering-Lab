@@ -212,12 +212,20 @@ resource "aws_athena_workgroup" "hunting" {
 locals {
   query_files = fileset("${path.module}/queries", "*.sql")
 
+  # Shared CTE for the threat-intel hunts (active indicators as IP ranges).
+  intel_active = trimspace(templatefile("${path.module}/intel_active.sql.tftpl", {
+    database    = local.database
+    intel_table = var.intel_table
+  }))
+
   queries = { for f in local.query_files : trimsuffix(f, ".sql") => {
     sql = templatefile("${path.module}/queries/${f}", {
       database      = local.database
       table         = local.table
       flow_table    = var.flow_table
       dns_table     = var.dns_table
+      intel_table   = var.intel_table
+      intel_active  = local.intel_active
       lookback_days = var.lookback_days
       recent_days   = var.recent_days
     })
@@ -253,6 +261,8 @@ locals {
         table         = local.table
         flow_table    = var.flow_table
         dns_table     = var.dns_table
+        intel_table   = var.intel_table
+        intel_active  = local.intel_active
         lookback_days = local.schedulable[k].baseline ? var.lookback_days : 2
         recent_days   = 2
       }))
@@ -267,6 +277,31 @@ resource "aws_athena_named_query" "hunt" {
   workgroup   = aws_athena_workgroup.hunting.name
   database    = aws_glue_catalog_database.security.name
   description = substr("${each.value.purpose} | ATT&CK: ${each.value.attack}", 0, 1024)
+  query       = each.value.sql
+
+  depends_on = [aws_glue_catalog_table.cloudtrail]
+}
+
+# Retro-hunt variants of the intel hunts: full lookback, plus findings_total so
+# the scheduled-hunts state machine can report them like any other run.
+locals {
+  retro = { for k, q in local.schedulable : k => {
+    title  = q.title
+    attack = q.attack
+    sql = templatefile("${path.module}/retro_wrapper.sql.tftpl", {
+      name  = k
+      inner = trimspace(q.sql)
+    })
+  } if contains(q.requires, "intel") }
+}
+
+resource "aws_athena_named_query" "retro" {
+  for_each = local.retro
+
+  name        = substr("retro/${each.key}: ${each.value.title}", 0, 128)
+  workgroup   = aws_athena_workgroup.hunting.name
+  database    = aws_glue_catalog_database.security.name
+  description = substr("Retro-hunt variant: full lookback, run when the indicator set changes. | ATT&CK: ${each.value.attack}", 0, 1024)
   query       = each.value.sql
 
   depends_on = [aws_glue_catalog_table.cloudtrail]
@@ -351,6 +386,26 @@ data "aws_iam_policy_document" "hunter" {
       test     = "StringLike"
       variable = "s3:prefix"
       values   = ["${local.cloudtrail_prefix}/*", "${local.cloudtrail_prefix}/"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.intel_bucket_arn == null ? [] : [1]
+    content {
+      sid       = "ReadThreatIntel"
+      effect    = "Allow"
+      actions   = ["s3:GetObject", "s3:GetObjectVersion"]
+      resources = ["${var.intel_bucket_arn}/indicators/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.intel_bucket_arn == null ? [] : [1]
+    content {
+      sid       = "ListThreatIntel"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [var.intel_bucket_arn]
     }
   }
 
