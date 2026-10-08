@@ -1,0 +1,68 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_call:      # also the gate for the live tiers (live.yml)
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    name: Offline tests (no AWS credentials needed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          pip install -r tests/hunts/requirements.txt \
+                      -r tests/scheduled/requirements.txt \
+                      -r tests/sigma/requirements.txt
+
+      - name: Sigma output is up to date
+        run: python3 scripts/sigma_convert.py --check
+
+      - name: Curated threat-intel indicators
+        run: python3 tests/intel/test_indicators.py
+
+      - name: IP key and CIDR range SQL (vs Python ipaddress)
+        run: python3 tests/hunts/test_ip_keys.py
+
+      - name: Hunts, scheduled and retro variants
+        run: python3 tests/hunts/test_hunts.py
+
+      - name: Scheduled-hunts state machine data flow
+        run: python3 tests/scheduled/test_state_machine.py
+
+      - name: Sigma converter (three-way differential)
+        run: python3 tests/sigma/test_sigma.py
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Live harness, offline (renders the catalogue with Terraform; no AWS)
+        run: |
+          pip install -r tests/live/requirements.txt
+          python3 tests/live/test_harness_offline.py
+
+      - name: State machine definition is valid ASL
+        run: |
+          python3 -c "import json,sys; sys.path.insert(0,'tests/scheduled'); import test_state_machine as t; print(json.dumps(t.render()))" > /tmp/hunts.asl.json
+          npx --yes asl-validator --json-path /tmp/hunts.asl.json
+
+  terraform:
+    name: Terraform fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
