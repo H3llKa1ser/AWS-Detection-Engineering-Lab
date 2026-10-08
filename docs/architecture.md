@@ -140,9 +140,49 @@ fails the plan instead of silently creating a rule against the wrong list.
 - **Not a substitute for GuardDuty.** AWS states the managed lists are an extra
   layer, not a replacement for GuardDuty.
 
-### Not covered: DNS Firewall Advanced
+### DNS Firewall Advanced
 
-AWS also offers rules that detect DGA and DNS-tunnelling patterns natively,
-without a domain list. In `hashicorp/aws` 5.x the firewall rule resource requires
-a domain list, so those rules are not expressible here; the lab's DNS detections
-cover those patterns from the query logs instead.
+Domain-list rules are only as current as the feed behind them. Advanced rules
+(priorities 400+) carry no list: AWS inspects the query string, its length and
+type, and request/response frequency to flag DGA names, dictionary-DGA names and
+tunnelling traffic. That covers the gap a list cannot: a fresh domain generated
+this morning.
+
+- **Provider.** Advanced rules need `hashicorp/aws` 6.x, where a firewall rule
+  takes `dns_threat_protection` and `confidence_threshold` and no longer
+  requires a domain list. The provider validates `confidence_threshold` but not
+  `dns_threat_protection`, so the root variable validates the protection names
+  to catch typos at plan time instead of at apply.
+- **Actions.** `BLOCK` or `ALERT`; `ALLOW` is not available for Advanced rules.
+- **Confidence.** `LOW` maximises detection and false positives, `HIGH` only
+  flags well-corroborated threats. Defaults are `BLOCK` at `MEDIUM`.
+- **False positives.** The priority-100 allow list runs before Advanced rules, so
+  allow-listing a domain is the override, as AWS documents.
+
+### Advanced verdict telemetry (EventBridge)
+
+The Resolver query-log reference documents `firewall_rule_action`,
+`firewall_rule_group_id` and `firewall_domain_list_id`, which tell you a query was
+blocked but not by which Advanced detector. DNS Firewall's EventBridge events do
+(`detail.firewall-protection` = `DGA`, `DICTIONARY_DGA` or `DNS_TUNNELING`).
+DNS Firewall sends them to the default event bus automatically, needs no extra
+permissions, and sends the same event for the same domain at most once per six
+hours.
+
+Per enabled protection the module creates:
+
+1. an EventBridge rule matching `source: aws.route53resolver`, both
+   `DNS Firewall Block` and `DNS Firewall Alert`, and that protection;
+2. a target writing raw events to `/aws/events/<prefix>-dns-firewall-advanced`
+   (encrypted with the lab CMK; the log-group resource policy only accepts
+   writes from these rules), kept as triage evidence;
+3. a CloudWatch alarm on the rule's `AWS/Events` `MatchedEvents` metric
+   (`RuleName` dimension) to the SNS topic. EventBridge publishes the metric only
+   when non-zero, so missing data is treated as not breaching.
+
+Alarming on the metric rather than pointing EventBridge straight at SNS keeps the
+lab's thresholded 5-minute model: a tunnelling session that produces hundreds of
+new names is one alarm, not hundreds of emails.
+
+These alarms live in the `dns-firewall` module rather than the metric-filter
+catalogue because they are driven by an AWS metric, not a log pattern.

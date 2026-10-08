@@ -52,3 +52,12 @@ dns_firewall_fail_open      = false
 
 # Only needed without the AWS CLI (e.g. CI): name => rslvr-fdl-... for every list above.
 # dns_firewall_managed_list_ids = {}
+
+# --- DNS Firewall Advanced (behavioural; no domain list) ---
+# Production rollout: ALERT at LOW first, review, then BLOCK at MEDIUM or HIGH.
+dns_firewall_advanced_protections = [
+  { protection = "DGA", action = "BLOCK", confidence = "MEDIUM" },
+  { protection = "DICTIONARY_DGA", action = "BLOCK", confidence = "MEDIUM" },
+  { protection = "DNS_TUNNELING", action = "BLOCK", confidence = "MEDIUM" },
+]
+dns_firewall_advanced_alarm_threshold = 1

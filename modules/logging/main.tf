@@ -48,12 +48,13 @@ resource "aws_kms_key" "logs" {
         Action    = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
         Resource  = "*"
         Condition = {
-          # CloudTrail log group plus every lab log group under /<prefix>/
-          # (VPC Flow Logs, Route 53 Resolver query logs).
+          # CloudTrail log group, every lab log group under /<prefix>/ (VPC Flow
+          # Logs, Resolver query logs) and EventBridge evidence groups.
           ArnLike = {
             "kms:EncryptionContext:aws:logs:arn" = [
               "arn:${var.partition}:logs:${var.region}:${var.account_id}:log-group:${local.log_group_name}",
               "arn:${var.partition}:logs:${var.region}:${var.account_id}:log-group:/${var.name_prefix}/*",
+              "arn:${var.partition}:logs:${var.region}:${var.account_id}:log-group:/aws/events/${var.name_prefix}-*",
             ]
           }
         }

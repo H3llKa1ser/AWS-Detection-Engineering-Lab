@@ -56,3 +56,8 @@ flow-log `log_format`, change `flow_fields` to match.
 - **DNS Firewall alerts** fire on every BLOCK or ALERT verdict. If a busy VPC
   produces steady blocks from a known, accepted cause, raise the threshold
   rather than removing the rule, or allow-list the domain if it is benign.
+- **DNS Firewall Advanced** alarms are not in the metric-filter catalogue: they
+  alarm on EventBridge's `MatchedEvents` metric per protection (see
+  `modules/dns-firewall/main.tf`). Tune them with
+  `dns_firewall_advanced_alarm_threshold`, or tune the detector itself with each
+  protection's `confidence`.

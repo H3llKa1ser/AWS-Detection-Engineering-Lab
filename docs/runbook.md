@@ -134,3 +134,32 @@ blocked the domain, then allow it with a higher-priority rule rather than
 weakening the block rule. Here that means adding the apex domain to
 `dns_firewall_allow_domains` (priority 100, ahead of every block rule) and
 applying. Record why in the commit message.
+
+## DNS Firewall Advanced alarm (DGA / dictionary DGA / tunnelling)
+
+The alarm name tells you the detector. Each underlying event is a newly flagged
+name. Raw events are in `/aws/events/<prefix>-dns-firewall-advanced`; their
+field names contain hyphens, so Logs Insights needs backticks:
+
+```
+fields @timestamp, `detail.firewall-protection` as protection,
+       `detail.firewall-rule-action` as action, `detail.query-name` as name,
+       `detail.query-type` as qtype, `detail.resources.0.instance-details.id` as instance
+| sort @timestamp desc
+| limit 100
+```
+
+- **DGA / dictionary DGA.** Malware cycling through generated domains to find its
+  command-and-control server. One instance producing many flagged names is a
+  strong compromise signal even if every lookup was blocked: the malware is
+  running. Contain the instance, then look for how it got there.
+- **DNS tunnelling.** Data or C2 carried in DNS labels, usually many unique
+  subdomains under one parent. Group the flagged names by their parent domain to
+  find the tunnel endpoint, then check how long the host has been talking to it
+  in the Resolver query logs (`query_name like /<parent>/`), because anything
+  before the block may have left.
+- **Rule in ALERT mode.** The queries were answered. Treat as an incident if the
+  pattern is real; if it is a known benign client, allow-list its domain.
+
+To pivot from a flagged name to every query that host made, take `srcids.instance`
+or `srcaddr` from the matching record in the Resolver query logs.

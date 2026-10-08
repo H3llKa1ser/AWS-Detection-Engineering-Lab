@@ -7,19 +7,17 @@
 resource "aws_guardduty_detector" "main" {
   count  = var.enable_guardduty ? 1 : 0
   enable = true
+}
 
-  datasources {
-    s3_logs {
-      enable = true
-    }
-    malware_protection {
-      scan_ec2_instance_with_findings {
-        ebs_volumes {
-          enable = true
-        }
-      }
-    }
-  }
+# Protection plans as detector features (the datasources block is deprecated
+# in hashicorp/aws 6.x). Foundational sources (CloudTrail management events,
+# VPC flow logs, DNS logs) need no feature: they are always on.
+resource "aws_guardduty_detector_feature" "main" {
+  for_each = var.enable_guardduty ? toset(["S3_DATA_EVENTS", "EBS_MALWARE_PROTECTION"]) : toset([])
+
+  detector_id = aws_guardduty_detector.main[0].id
+  name        = each.value
+  status      = "ENABLED"
 }
 
 resource "aws_securityhub_account" "main" {

@@ -12,7 +12,7 @@ data "aws_partition" "current" {}
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
-  region     = data.aws_region.current.name
+  region     = data.aws_region.current.region
   partition  = data.aws_partition.current.partition
 }
 
@@ -127,6 +127,13 @@ module "dns_firewall" {
   block_response          = var.dns_firewall_block_response
   block_override_domain   = var.dns_firewall_block_override_domain
   fail_open               = var.dns_firewall_fail_open
+
+  advanced_protections     = var.dns_firewall_advanced_protections
+  advanced_alarm_threshold = var.dns_firewall_advanced_alarm_threshold
+  alert_topic_arn          = module.alerting.alert_topic_arn
+  kms_key_arn              = module.logging.kms_key_arn
+  account_id               = local.account_id
+  partition                = local.partition
 }
 
 check "dns_firewall_visibility" {

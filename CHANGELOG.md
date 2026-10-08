@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0: DNS Firewall Advanced, AWS provider 6.x
+
+### Added
+- DNS Firewall Advanced rules (priorities 400+): DGA, dictionary DGA and DNS
+  tunnelling detectors with per-rule BLOCK/ALERT and LOW/MEDIUM/HIGH confidence.
+  Default: all three BLOCK at MEDIUM. Plan-time validation of protection names
+  (the provider does not validate them).
+- Per-protection EventBridge rules on DNS Firewall's `DNS Firewall Block` /
+  `DNS Firewall Alert` events, raw events kept in
+  `/aws/events/<prefix>-dns-firewall-advanced`, and alarms on each rule's
+  `MatchedEvents` metric to SNS, identifying which detector fired.
+- Traffic generator: DGA-shaped names under real TLDs and a dictionary-DGA burst.
+
+### Changed
+- **`hashicorp/aws` ~> 5.0 -> ~> 6.0.** Advanced rules need 6.x: in 5.x a
+  firewall rule requires a domain list and has no threat-protection settings.
+- GuardDuty protection plans moved from the deprecated `datasources` block to
+  `aws_guardduty_detector_feature` (S3 data events, EBS malware protection).
+- `data.aws_region.current.name` -> `.region` (deprecated in 6.x).
+- Lab CMK key policy also covers `/aws/events/<prefix>-*` log groups.
+
+### Upgrading an existing deployment from 0.3.x
+1. `terraform init -upgrade` to fetch provider 6.x.
+2. `terraform plan`: expect two new `aws_guardduty_detector_feature` resources
+   (they take over settings the detector already has), the Advanced rules,
+   EventBridge rules and alarms, and an in-place KMS key policy update.
+3. Review, then apply.
+
 ## 0.3.0: DNS Firewall, plus corrections
 
 ### Added

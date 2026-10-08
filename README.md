@@ -22,8 +22,8 @@ architecture and infrastructure-as-code in one repo.
 | **Config & compliance** | AWS Config recorder + 10 managed rules | Continuous configuration drift / misconfiguration detection |
 | **Managed detection** | GuardDuty, Security Hub (AWS FSBP + CIS 1.4) | Behavioural threat detection and standards scoring |
 | **Network telemetry** | VPC Flow Logs (custom v5 format) + Route 53 Resolver query logs → CloudWatch Logs, isolated lab VPC | Network and DNS visibility you own and can write detections against |
-| **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists + custom block/allow lists | Prevention: known-bad domains get no answer, and every verdict is logged |
-| **Detection-as-code** | 26 CloudWatch metric-filter alarms over CloudTrail, flow and DNS logs | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
+| **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists, custom block/allow lists, and DNS Firewall Advanced (DGA, dictionary DGA, tunnelling) | Prevention: known-bad domains *and* never-seen-before DGA/tunnelling traffic get no answer; every verdict is logged |
+| **Detection-as-code** | 26 metric-filter alarms over CloudTrail, flow and DNS logs, plus 3 EventBridge-driven alarms for DNS Firewall Advanced | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -48,11 +48,13 @@ flowchart LR
         DNS[Route 53 Resolver<br/>query logs]
         FW -->|verdict: BLOCK / ALERT| DNS
     end
+    FW -->|Advanced verdict events| EB
 
     CT -->|log stream| CWL[CloudWatch Logs]
     FL --> CWL
     DNS --> CWL
     CWL -->|metric filters| ALM[26 Metric-filter Alarms]
+    EB -->|MatchedEvents alarms| SNS
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
 
     CFG --> SH
@@ -111,6 +113,9 @@ skipped automatically.
 | `.onion` lookup | DNS | 1 | T1090.003 Multi-hop Proxy |
 | DNS Firewall blocked a query | DNS Firewall | 1 | T1071.004 / T1568 Dynamic Resolution |
 | DNS Firewall ALERT rule matched | DNS Firewall | 1 | T1071.004 / T1568 Dynamic Resolution |
+| DNS Firewall Advanced: DGA | EventBridge | 1 new name | T1568.002 Domain Generation Algorithms |
+| DNS Firewall Advanced: dictionary DGA | EventBridge | 1 new name | T1568.002 Domain Generation Algorithms |
+| DNS Firewall Advanced: DNS tunnelling | EventBridge | 1 new name | T1071.004 DNS / T1048 Exfiltration |
 
 ### How this relates to GuardDuty
 
@@ -141,6 +146,9 @@ pool. One rule group, first match wins:
 | 300 | BLOCK | `AWSManagedDomainsMalwareDomainList` |
 | 310 | BLOCK | `AWSManagedDomainsBotnetCommandandControl` |
 | 320 | BLOCK | `AWSManagedDomainsAggregateThreatList` (superset of the others; catches the rest) |
+| 400 | BLOCK | **Advanced** DGA detector, MEDIUM confidence |
+| 410 | BLOCK | **Advanced** dictionary-DGA detector, MEDIUM confidence |
+| 420 | BLOCK | **Advanced** DNS-tunnelling detector, MEDIUM confidence |
 
 The specific managed lists run before the aggregate so a block is attributed to
 its category in the logs. Design choices, all configurable:
@@ -160,6 +168,35 @@ its category in the logs. Design choices, all configurable:
   on `BLOCK` and `ALERT`. A block stopped the lookup, not the compromise: it is
   still an incident on the asking host.
 
+### DNS Firewall Advanced
+
+Domain lists only stop names someone has already reported. Advanced rules carry
+no list: AWS inspects query strings, their length and type, and request and
+response frequency to flag DGA-generated names (random-looking or built from
+dictionary words) and DNS tunnelling as they happen, including domains no
+threat feed knows yet. Each rule takes `BLOCK` or `ALERT` (Advanced rules cannot
+`ALLOW`) and a confidence threshold: `LOW` catches the most with more false
+positives, `HIGH` only well-corroborated threats. The lab defaults to `BLOCK` at
+`MEDIUM`; AWS's guidance for production translates to `ALERT` at `LOW` first,
+review, then `BLOCK` at `MEDIUM` or `HIGH`. Because the allow list runs at
+priority 100, it overrides Advanced false positives too, which is the remedy AWS
+documents for them.
+
+**Which detector fired.** The query logs record that a query was blocked, but the
+detector name is only documented in DNS Firewall's EventBridge events
+(`detail.firewall-protection`). So each enabled protection gets an EventBridge
+rule that stores the raw events in `/aws/events/<prefix>-dns-firewall-advanced`
+and an alarm on that rule's `MatchedEvents` metric. DNS Firewall emits at most
+one event per domain per 6 hours, so each event is a newly flagged name, and
+alarming on the metric gives one notification per 5 minutes instead of an email
+per name, which matters for tunnelling, where every query is a new name.
+
+**Interaction to know about.** When Advanced blocks DGA names with the default
+`NODATA` response, they are logged as `NOERROR`, not `NXDOMAIN`. Prevention
+therefore quiets `dns_nxdomain_spike` for the traffic it stops, and
+`dns_firewall_block` plus the Advanced alarms take over. That is the intended
+outcome: you are told the class of threat, not just a volume anomaly.
+
 Managed-list IDs differ per region and the AWS provider cannot look a list up by
 name, so a small script asks the AWS CLI for them at plan time. Each resolved ID
 is then read through the provider and checked to really be that AWS-managed list
@@ -168,7 +205,7 @@ before any rule uses it. Without the AWS CLI (e.g. in CI), pass the IDs in
 
 ## Prerequisites
 
-- Terraform >= 1.5
+- Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
 - AWS CLI v2 and bash, authenticated to a **non-production / sandbox account** you can afford to deploy managed services in (the CLI is also used at plan time to resolve DNS Firewall managed-list IDs)
 - Permissions to create IAM, CloudTrail, Config, GuardDuty, Security Hub, SNS, EventBridge, Lambda, KMS and S3 resources
 
@@ -203,9 +240,10 @@ aws ec2 create-security-group --group-name detlab-test --description test
 # -> fires the "security group changes" alarm within ~5 minutes
 
 # 3. Exercise the DNS and DNS Firewall detections: set deploy_traffic_generator
-#    = true, apply, and within ~10 minutes the NXDOMAIN, TXT, mining-pool, .onion
-#    and DNS Firewall block alarms fire (the generator queries AWS's test domains
-#    for the managed lists)
+#    = true, apply, and within ~10 minutes the TXT, mining-pool, .onion and DNS
+#    Firewall block alarms fire (the generator queries AWS's test domains for
+#    the managed lists). It also sends DGA- and tunnelling-shaped traffic for the
+#    Advanced rules; that part is best effort, see docs/validation.md
 terraform apply -var deploy_traffic_generator=true
 ```
 
@@ -223,7 +261,9 @@ logs bill on CloudWatch Logs ingestion: negligible on the empty lab VPC, but
 budget for it before adding a busy VPC to `monitored_vpc_ids`. The lab VPC
 itself is free (no NAT gateway); the opt-in traffic generator is one t3.micro.
 DNS Firewall bills on queries inspected and on domains held in your own lists;
-the AWS-managed lists carry no charge of their own. Expect **single-digit
+the AWS-managed lists carry no charge of their own. DNS Firewall Advanced is
+priced separately per query inspected; check the Route 53 pricing page before
+enabling it on a busy VPC. Expect **single-digit
 to low-tens of USD/month** idle; more if you generate heavy activity. Destroy
 when you are done.
 
@@ -262,7 +302,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 
 - [x] VPC Flow Logs + Route 53 Resolver query logging modules, with network and DNS detections
 - [x] Route 53 Resolver DNS Firewall with managed threat domain lists (block, not just detect)
-- [ ] DNS Firewall Advanced (native DGA and DNS-tunnelling rules). Not expressible with `hashicorp/aws` 5.x, whose firewall rule requires a domain list
+- [x] DNS Firewall Advanced (native DGA, dictionary-DGA and DNS-tunnelling rules), via `hashicorp/aws` 6.x
 - [ ] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)

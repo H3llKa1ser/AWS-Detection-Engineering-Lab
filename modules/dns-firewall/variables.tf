@@ -55,3 +55,39 @@ variable "association_priority" {
   type        = number
   default     = 200
 }
+
+# --- DNS Firewall Advanced -----------------------------------------------------
+
+variable "advanced_protections" {
+  description = "DNS Firewall Advanced rules (no domain list): protection DGA | DICTIONARY_DGA | DNS_TUNNELING, action BLOCK | ALERT, confidence LOW | MEDIUM | HIGH."
+  type = list(object({
+    protection = string
+    action     = string
+    confidence = string
+  }))
+  default = []
+}
+
+variable "alert_topic_arn" {
+  description = "SNS topic for Advanced verdict alarms."
+  type        = string
+}
+
+variable "advanced_alarm_threshold" {
+  description = "Advanced verdict events per 5 minutes before alarming. Each event is a newly flagged name (DNS Firewall sends one per domain per 6 hours)."
+  type        = number
+  default     = 1
+}
+
+variable "account_id" { type = string }
+variable "partition" { type = string }
+
+variable "kms_key_arn" {
+  type    = string
+  default = null
+}
+
+variable "event_log_retention_days" {
+  type    = number
+  default = 90
+}

@@ -42,7 +42,8 @@ minutes, sends to the Route 53 Resolver:
 
 | Traffic | Expected alarm |
 |---------|----------------|
-| 80 random `*.invalid` lookups | `dns_nxdomain_spike` |
+| 80 random high-entropy `.com`/`.net`/`.info` lookups | `dns_nxdomain_spike` (unless Advanced blocks them first; see below) |
+| 40 word-triple `.com` lookups | Dictionary-DGA shape for Advanced |
 | 150 TXT lookups with 40-char random labels | `dns_txt_query_spike` (and adds to the NXDOMAIN count) |
 | Lookups of public mining-pool hostnames | `dns_mining_pool_lookup`, plus `dns_firewall_block` (they are on the default custom blocklist). With `dns_firewall_block_domains = []`, expect a real GuardDuty `CryptoCurrency:EC2/BitcoinTool.B!DNS` finding instead; I have not verified whether GuardDuty still raises it when the query is blocked |
 | One `.onion` lookup | `dns_onion_lookup` |
@@ -68,6 +69,36 @@ Unblocked, AWS's test domains resolve to `1.2.3.4`. Blocked with the default
 `NODATA` response, the record shows `rcode` `NOERROR` and no answer. Switch a list
 to `ALERT` in `dns_firewall_managed_lists` and apply: its test domain then resolves
 to `1.2.3.4` again and `dns_firewall_alert` fires instead.
+
+### DNS Firewall Advanced (best effort)
+
+AWS publishes test domains for the managed lists, not for Advanced, which is
+behavioural. The generator's DGA, dictionary-DGA and tunnelling bursts have the
+right *shape*, but whether they cross a given confidence threshold is AWS's call.
+To give them the best chance:
+
+```bash
+terraform apply \
+  -var deploy_traffic_generator=true \
+  -var 'dns_firewall_advanced_protections=[{protection="DGA",action="ALERT",confidence="LOW"},{protection="DICTIONARY_DGA",action="ALERT",confidence="LOW"},{protection="DNS_TUNNELING",action="ALERT",confidence="LOW"}]'
+```
+
+`ALERT` keeps the queries answered so you can compare. Then check:
+
+```bash
+aws logs tail /aws/events/detlab-dns-firewall-advanced --since 30m
+```
+
+If events appear, the matching `detlab-dns_firewall_advanced_*` alarm should go
+to ALARM within one 5-minute period. If nothing appears after a few cycles,
+Advanced simply did not flag this synthetic traffic at that confidence. The
+rules, routing and alarms are still in place, and real DGA malware or a real
+tunnelling tool (e.g. `dnscat2` or `iodine` against a domain you own, from a
+sandbox) is the definitive test.
+
+**Expect `dns_nxdomain_spike` to go quiet** if Advanced blocks the DGA burst: with
+the `NODATA` block response those queries are logged as `NOERROR`. That is
+prevention working, not a broken detection.
 
 Turn it off when done: `terraform apply -var deploy_traffic_generator=false`.
 

@@ -202,3 +202,40 @@ variable "dns_firewall_fail_open" {
   type        = bool
   default     = false
 }
+
+variable "dns_firewall_advanced_protections" {
+  description = "DNS Firewall Advanced rules, evaluated after the managed lists. Confidence: LOW catches most with more false positives, HIGH only well-corroborated threats. For production, start with ALERT at LOW to see what you would catch, then BLOCK at MEDIUM or HIGH. Set to [] to disable."
+  type = list(object({
+    protection = string
+    action     = string
+    confidence = string
+  }))
+  default = [
+    { protection = "DGA", action = "BLOCK", confidence = "MEDIUM" },
+    { protection = "DICTIONARY_DGA", action = "BLOCK", confidence = "MEDIUM" },
+    { protection = "DNS_TUNNELING", action = "BLOCK", confidence = "MEDIUM" },
+  ]
+
+  validation {
+    condition     = alltrue([for a in var.dns_firewall_advanced_protections : contains(["DGA", "DICTIONARY_DGA", "DNS_TUNNELING"], upper(a.protection))])
+    error_message = "protection must be DGA, DICTIONARY_DGA or DNS_TUNNELING."
+  }
+  validation {
+    condition     = alltrue([for a in var.dns_firewall_advanced_protections : contains(["BLOCK", "ALERT"], upper(a.action))])
+    error_message = "Advanced rules support BLOCK or ALERT only (ALLOW is not available for Advanced rules)."
+  }
+  validation {
+    condition     = alltrue([for a in var.dns_firewall_advanced_protections : contains(["LOW", "MEDIUM", "HIGH"], upper(a.confidence))])
+    error_message = "confidence must be LOW, MEDIUM or HIGH."
+  }
+  validation {
+    condition     = length(distinct([for a in var.dns_firewall_advanced_protections : upper(a.protection)])) == length(var.dns_firewall_advanced_protections)
+    error_message = "Each protection may appear only once."
+  }
+}
+
+variable "dns_firewall_advanced_alarm_threshold" {
+  description = "Newly flagged names per 5 minutes, per Advanced protection, before alarming."
+  type        = number
+  default     = 1
+}

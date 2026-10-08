@@ -7,8 +7,9 @@ detections in this lab have something to fire on. Standard library only: the
 lab VPC has no internet path, so nothing can be installed.
 
 Every cycle it produces:
-  * a burst of random-label lookups under the reserved .invalid TLD
-    (NXDOMAIN spike, resembles DGA beaconing)
+  * a burst of random, high-entropy .com/.net/.info names (classic DGA shape;
+    almost all are unregistered, so this is also the NXDOMAIN spike)
+  * a burst of word-pair names (dictionary-DGA shape)
   * a burst of TXT lookups with long random labels (DNS tunnelling shape)
   * lookups of public cryptomining-pool hostnames (also expected to raise a
     real GuardDuty CryptoCurrency:EC2/BitcoinTool.B!DNS finding)
@@ -18,6 +19,10 @@ Every cycle it produces:
     blocked
 
 Nothing here contacts a mining pool or Tor: it only asks the resolver for names.
+
+DNS Firewall Advanced is behavioural and AWS publishes no test domains for it,
+so whether this synthetic traffic trips DGA / dictionary-DGA / tunnelling rules
+at a given confidence is not guaranteed. LOW confidence gives the best chance.
 """
 import random
 import socket
@@ -35,6 +40,18 @@ CYCLE_SECONDS = 900
 FIREWALL_TEST_DOMAINS = [
     f"controldomain1.{lst}.firewall.route53resolver.us-east-1.amazonaws.com"
     for lst in ("botnetlist", "malwarelist", "aggregatelist")
+]
+
+DGA_TLDS = ["com", "net", "info"]
+
+# Small fixed wordlist: dictionary DGAs glue real words together so names look
+# legitimate. Some word pairs may be registered domains; the generator only
+# resolves them, it never connects.
+WORDS = [
+    "amber", "anchor", "atlas", "beacon", "breeze", "canyon", "cedar", "comet",
+    "coral", "delta", "ember", "falcon", "forest", "galaxy", "harbor", "island",
+    "jungle", "lantern", "maple", "meadow", "nebula", "orbit", "pepper", "quartz",
+    "raven", "river", "silver", "summit", "thunder", "velvet", "willow", "zenith",
 ]
 
 MINING_POOL_NAMES = [
@@ -68,7 +85,10 @@ def query(name: str, qtype: str = "A") -> None:
 
 def cycle() -> None:
     for _ in range(80):
-        query(f"{_label()}.{_label(8)}.invalid")
+        query(f"{_label(random.randint(12, 18))}.{random.choice(DGA_TLDS)}")
+    for _ in range(40):
+        a, b, c = random.sample(WORDS, 3)
+        query(f"{a}{b}{c}.com")
     for _ in range(150):
         query(f"{_label(40)}.tunnel.detlab.invalid", "TXT")
     for name in MINING_POOL_NAMES:

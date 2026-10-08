@@ -57,3 +57,13 @@ output "dns_firewall_managed_list_ids" {
   description = "Resolved managed-list IDs, to match firewall_domain_list_id in query logs."
   value       = var.enable_dns_firewall ? module.dns_firewall[0].managed_domain_list_ids : null
 }
+
+output "dns_firewall_advanced_alarms" {
+  description = "Alarms raised by DNS Firewall Advanced verdicts (null when the firewall is disabled)."
+  value       = var.enable_dns_firewall ? module.dns_firewall[0].advanced_alarm_names : null
+}
+
+output "dns_firewall_advanced_event_log" {
+  description = "Log group holding raw DNS Firewall Advanced EventBridge events, for triage."
+  value       = var.enable_dns_firewall ? module.dns_firewall[0].advanced_event_log_group : null
+}
