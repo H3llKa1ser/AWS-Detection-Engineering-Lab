@@ -1,0 +1,142 @@
+name: live
+
+# Live tiers against a dedicated sandbox AWS account (see ci/bootstrap/).
+# Never runs on push or pull_request: only on demand and on a weekly schedule,
+# behind the `sandbox` GitHub environment (add required reviewers there).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Which live tier to run
+        type: choice
+        options: [both, conformance, e2e]
+        default: both
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC
+
+permissions:
+  contents: read
+  id-token: write          # GitHub OIDC -> AWS role; no stored AWS keys
+
+concurrency:
+  group: aws-sandbox       # shared with the janitor: one sandbox user at a time
+  cancel-in-progress: false  # cancelling mid-apply/destroy would orphan resources
+
+env:
+  AWS_REGION: ${{ vars.AWS_SANDBOX_REGION }}
+
+jobs:
+  offline:
+    uses: ./.github/workflows/tests.yml
+
+  conformance:
+    needs: offline
+    if: github.event_name == 'schedule' || inputs.tier != 'e2e'
+    runs-on: ubuntu-latest
+    environment: sandbox
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tests/live/requirements.txt
+      - uses: hashicorp/setup-terraform@v3
+      - name: Render the detection catalogue (no AWS access needed)
+        run: |
+          terraform -chdir=ci/render-catalogue init -input=false
+          terraform -chdir=ci/render-catalogue plan -input=false -out=plan.bin
+          terraform -chdir=ci/render-catalogue show -json plan.bin > catalogue-plan.json
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SANDBOX_REGION }}
+      - name: Conformance (real CloudWatch and Athena)
+        run: |
+          python3 tests/live/test_conformance.py \
+            --catalogue-plan catalogue-plan.json \
+            --workgroup "${{ vars.AWS_SANDBOX_CI_WORKGROUP }}" \
+            --report conformance-report.md
+      - name: Report
+        if: always()
+        run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-report
+          path: conformance-report.*
+
+  e2e:
+    needs: [offline, conformance]
+    if: >-
+      always() && needs.offline.result == 'success' &&
+      (needs.conformance.result == 'success' || needs.conformance.result == 'skipped') &&
+      (github.event_name == 'schedule' || inputs.tier != 'conformance')
+    runs-on: ubuntu-latest
+    environment: sandbox
+    timeout-minutes: 170
+    env:
+      PREFIX: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tests/live/requirements.txt
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5     # S3 native state locking (use_lockfile)
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SANDBOX_REGION }}
+          role-duration-seconds: 10800
+
+      - id: init
+        name: Remote state for this run
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > backend_override.tf
+          terraform init \
+            -backend-config="bucket=${{ vars.AWS_SANDBOX_STATE_BUCKET }}" \
+            -backend-config="key=e2e/${PREFIX}/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - id: apply
+        name: Apply
+        run: |
+          terraform apply -auto-approve -var-file=ci/e2e.tfvars -var="name_prefix=${PREFIX}"
+          terraform output -json > outputs.json
+
+      - id: test
+        name: End-to-end checks
+        run: python3 tests/live/test_e2e.py --outputs outputs.json --prefix "${PREFIX}" --report e2e-report.md
+
+      - id: destroy
+        name: Destroy (always)
+        if: always() && steps.init.outcome == 'success'
+        run: |
+          for attempt in 1 2; do
+            terraform destroy -auto-approve -var-file=ci/e2e.tfvars -var="name_prefix=${PREFIX}" && exit 0
+            echo "destroy attempt ${attempt} failed; retrying in 60s"; sleep 60
+          done
+          echo "::error::destroy failed; the janitor will retry from the saved state (e2e/${PREFIX}/)"
+          exit 1
+
+      - name: Remove state after a clean destroy
+        if: always() && steps.destroy.outcome == 'success'
+        run: aws s3 rm "s3://${{ vars.AWS_SANDBOX_STATE_BUCKET }}/e2e/${PREFIX}/" --recursive
+
+      - name: Report
+        if: always()
+        run: cat e2e-report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-report
+          path: e2e-report.*
