@@ -115,3 +115,8 @@ output "threat_intel" {
     retro_rule = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].retro_trigger : null
   } : null
 }
+
+output "internal_cidrs" {
+  description = "Ranges the network hunts treat as internal, on top of the built-in private and special ranges."
+  value       = local.internal_cidrs
+}

@@ -70,6 +70,7 @@ module "lab_vpc" {
 
   name_prefix = var.name_prefix
   cidr_block  = var.lab_vpc_cidr
+  enable_ipv6 = var.lab_vpc_ipv6
 }
 
 locals {
@@ -108,6 +109,23 @@ locals {
     var.create_lab_vpc ? { lab = module.lab_vpc[0].vpc_id } : {},
     { for id in var.monitored_vpc_ids : id => id },
   )
+}
+
+# Internal address ranges for the network hunts: every monitored VPC's IPv4
+# and IPv6 CIDR blocks (VPC IPv6 addresses are globally routable, so only the
+# VPC's own ranges mark them internal), plus extra_internal_cidrs.
+data "aws_vpc" "monitored" {
+  for_each = local.monitored_vpcs
+  id       = each.value
+}
+
+locals {
+  internal_cidrs = distinct(compact(concat(
+    flatten([for v in data.aws_vpc.monitored : [for a in v.cidr_block_associations : a.cidr_block]]),
+    [for v in data.aws_vpc.monitored : v.ipv6_cidr_block],
+    flatten([for v in data.aws_vpc.monitored : [for a in v.ipv6_cidr_block_associations : a.ipv6_cidr_block]]),
+    var.extra_internal_cidrs,
+  )))
 }
 
 module "vpc_flow_logs" {
@@ -226,6 +244,7 @@ module "threat_hunting" {
   recent_days            = var.hunting_recent_days
   bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
   scheduled_hunts        = var.enable_scheduled_hunts ? local.scheduled_hunt_list : []
+  internal_cidrs         = local.internal_cidrs
 
   available_sources = concat(
     ["cloudtrail"],

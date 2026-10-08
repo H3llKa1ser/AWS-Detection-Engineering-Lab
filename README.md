@@ -302,21 +302,23 @@ never-expiring intel is the main source of false positives in threat-intel
 programmes:
 
 - **Curated in git.** `intel/indicators/*.csv` (format and rules in
-  [intel/README.md](intel/README.md)): indicator, type (`ipv4`, `cidr`,
-  `domain`), source, confidence, added, **expires**, description, reference.
+  [intel/README.md](intel/README.md)): indicator, type (`ipv4`, `ipv6`,
+  `cidr`, `domain`), source, confidence, added, **expires**, description,
+  reference.
   Changes are pull requests; the git history records what you believed and why.
 - **Validated twice.** `tests/intel/test_indicators.py` (CI) enforces the full
-  rules: real address parsing, no internal or reserved ranges, no CIDR wider
-  than /16, no platform apex domains (subdomain matching would turn
-  `amazonaws.com` into "everything"), aligned CIDRs, no duplicates, lifetimes
-  capped. Terraform re-checks the essentials at plan time and refuses to upload
+  rules: real address parsing, no internal or reserved ranges (IPv4 and
+  IPv6), no CIDR wider than /16 (IPv4) or /32 (IPv6), no platform apex domains
+  (subdomain matching would turn `amazonaws.com` into "everything"), aligned
+  CIDRs, canonical IPv6 notation, no duplicates, lifetimes capped. Terraform re-checks the essentials at plan time and refuses to upload
   a broken set.
 - **One versioned object.** Terraform merges every file into a single sorted CSV
   in a versioned, KMS-encrypted bucket, behind the `threat_indicators` table.
   Sorting means re-ordering rows changes nothing; versioning keeps every set
   ever applied.
-- **Matching.** IPs and CIDRs become integer ranges, so one comparison covers
-  both; domains match themselves and subdomains on a dot boundary (`evil.com`
+- **Matching.** Every address, IPv4 or IPv6, in any textual form, becomes the
+  same canonical key, and CIDRs become key ranges, so one comparison covers
+  both families (see "IPv4 and IPv6" below); domains match themselves and subdomains on a dot boundary (`evil.com`
   matches `a.evil.com`, never `notevil.com`); expired indicators stop matching.
   Hunt 22 checks flow endpoints, 23 checks DNS queries *and the IPs they
   resolved to*, 24 checks CloudTrail source IPs.
@@ -331,7 +333,31 @@ programmes:
   find. A test runs the real curated files through the merge and the hunt.
 - **Real feeds, carefully.** `scripts/import_feodo.py` imports abuse.ch's Feodo
   Tracker botnet C2 list into `feodotracker.csv` with a 30-day expiry for
-  review. IPv6 indicators are not supported yet.
+  review (IPv4 and IPv6).
+
+### IPv4 and IPv6
+
+Every hunt that reasons about addresses (18-20, 22-24) works on both families:
+
+- **One canonical key.** Shared SQL (`modules/threat-hunting/sql/ip_key.sql`)
+  turns any address into 32 hex digits (IPv4 as `::ffff:a.b.c.d`), so
+  `2001:db8::1`, `2001:0DB8:0:0:0:0:0:1` and every other spelling compare equal.
+  CIDRs become `[lo, hi]` key ranges at any prefix length. Malformed input
+  gives no key (no match), never a wrong one.
+- **Internal is a list, not a regex.** VPC IPv6 addresses are globally routable,
+  so no address pattern can tell internal from external. The network hunts use
+  the private and special ranges of both families plus every CIDR block of the
+  monitored VPCs, discovered by Terraform, plus `extra_internal_cidrs` (peered
+  VPCs, on-premises). The lab VPC is dual-stack (`lab_vpc_ipv6`, an
+  Amazon-provided /56 at no charge).
+- **Tested against Python's `ipaddress`.** `tests/hunts/test_ip_keys.py`
+  compares the SQL with Python on more than 5,000 addresses in every textual
+  form, 3,000 random networks at every prefix length, and 12,000 membership
+  checks; the SQL itself was mutation-checked.
+
+Not supported (no match, documented): embedded-IPv4 notation
+(`::ffff:1.2.3.4`) and scoped addresses (`fe80::1%eth0`), which AWS log
+sources do not write.
 
 **The hunts are tested.** `tests/hunts/test_hunts.py` renders each query the way
 Terraform does, transpiles it to DuckDB and runs it against synthetic CloudTrail
@@ -440,6 +466,7 @@ terraform apply -var deploy_traffic_generator=true
 pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
 python3 tests/hunts/test_hunts.py && python3 tests/scheduled/test_state_machine.py
 python3 tests/intel/test_indicators.py   # curated indicators (standard library only)
+python3 tests/hunts/test_ip_keys.py      # IPv4/IPv6 key and range SQL vs Python ipaddress
 
 # 5. Run the scheduled hunts now instead of waiting for 06:00 UTC
 $(terraform output -raw run_scheduled_hunts_now)
@@ -507,7 +534,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
 │   ├── threat-intel/      # indicator validation + merge, versioned S3 object, Athena table
-│   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql)
+│   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql), shared SQL (sql/)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
 │   ├── response/          # opt-in Lambda auto-response
 │   └── traffic-generator/ # opt-in DNS traffic generator instance
@@ -528,7 +555,8 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] Scheduled hunts: run selected saved queries daily and alert on non-empty results (once per finding, with a dead man's switch)
 - [x] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail (7 network and cross-source hunts)
 - [x] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow, DNS and CloudTrail, with retro-hunts on change (25 tested hunts in total)
-- [ ] IPv6 support for flow hunts and IP/CIDR indicators
+- [x] IPv6 support for flow hunts and IP/CIDR indicators (canonical address keys; VPC-aware internal ranges)
+- [ ] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

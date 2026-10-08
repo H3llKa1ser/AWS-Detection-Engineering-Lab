@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.0: IPv6
+
+### Fixed
+- **Hunts 18-20 mishandled IPv6.** "Internal" was an IPv4 private-range regex,
+  so every IPv6 address counted as external: VPC-internal and ULA traffic
+  appeared as external transfers (18) and unresolved egress (20), and IPv6
+  sweeps were invisible (19). Hunt 20 also compared DNS answers to flow
+  destinations as strings, which fails across IPv6 notations.
+
+### Added
+- Shared SQL in `modules/threat-hunting/sql/`: canonical 32-hex address keys
+  for IPv4 and IPv6 (`ip_key.sql`), CIDR to key ranges at any prefix length
+  (`cidr_ranges`), and internal ranges (`internal_nets`).
+- Internal ranges = private/special ranges of both families + every IPv4 and
+  IPv6 CIDR block of the monitored VPCs (discovered) + `extra_internal_cidrs`.
+- Lab VPC is dual-stack (`lab_vpc_ipv6`, Amazon-provided /56).
+- Indicators: `ipv6` type and IPv6 CIDRs (/32 or narrower), IPv6 internal and
+  special ranges rejected, canonical RFC 5952 notation required in CI;
+  Terraform plan-time checks for the same essentials. IPv6 canaries in
+  `lab-canaries.csv`; the Feodo importer accepts IPv6.
+- `tests/hunts/test_ip_keys.py`: property tests of the SQL against Python's
+  `ipaddress`. IPv6 cases in hunt tests 18-20 and 22-24.
+- Outputs `internal_cidrs`; variables `lab_vpc_ipv6`, `extra_internal_cidrs`.
+
+### Changed
+- Hunts 22-24 match on canonical key ranges instead of IPv4 integer ranges
+  (same results for IPv4; all IPv4 tests unchanged and passing).
+- `intel_active.sql.tftpl` moved to `modules/threat-hunting/sql/`.
+
 ## 0.8.0: Threat intelligence and retro-hunting
 
 ### Added

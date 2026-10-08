@@ -365,3 +365,22 @@ variable "retro_hunt_on_intel_change" {
   type        = bool
   default     = true
 }
+
+# --- IPv6 / internal ranges ------------------------------------------------------------
+
+variable "lab_vpc_ipv6" {
+  description = "Make the lab VPC dual-stack with an Amazon-provided IPv6 /56 (no charge)."
+  type        = bool
+  default     = true
+}
+
+variable "extra_internal_cidrs" {
+  description = "Extra IPv4/IPv6 ranges the network hunts treat as internal: peered VPCs, on-premises ranges, anything else your monitored VPCs reach privately. All CIDR blocks of the monitored VPCs are discovered automatically."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for c in var.extra_internal_cidrs : can(cidrhost(c, 0))])
+    error_message = "Each extra_internal_cidrs entry must be an IPv4 or IPv6 CIDR."
+  }
+}
