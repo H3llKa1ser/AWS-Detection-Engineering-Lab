@@ -17,3 +17,17 @@ kms_encrypt_logs           = true
 
 # Opt-in: lets a Lambda revoke offending security-group rules automatically.
 enable_response_automation = false
+
+# --- Network telemetry ---
+enable_vpc_flow_logs       = true
+enable_dns_query_logging   = true
+create_lab_vpc             = true
+lab_vpc_cidr               = "10.42.0.0/16"
+network_log_retention_days = 30
+
+# Attach telemetry to existing VPCs with real workloads (needed to exercise
+# the flow-log detections; the isolated lab VPC has no inbound/outbound path).
+monitored_vpc_ids = []
+
+# Opt-in: one t3.micro that generates DNS traffic to fire the DNS detections.
+deploy_traffic_generator = false

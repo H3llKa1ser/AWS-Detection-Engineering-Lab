@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""
+Detection-lab DNS traffic generator.
+
+Sends hand-built DNS queries straight to the Route 53 Resolver so that the DNS
+detections in this lab have something to fire on. Standard library only: the
+lab VPC has no internet path, so nothing can be installed.
+
+Every cycle it produces:
+  * a burst of random-label lookups under the reserved .invalid TLD
+    (NXDOMAIN spike, resembles DGA beaconing)
+  * a burst of TXT lookups with long random labels (DNS tunnelling shape)
+  * lookups of public cryptomining-pool hostnames (also expected to raise a
+    real GuardDuty CryptoCurrency:EC2/BitcoinTool.B!DNS finding)
+  * a .onion lookup (Tor usage indicator)
+
+Nothing here contacts a mining pool or Tor: it only asks the resolver for names.
+"""
+import random
+import socket
+import string
+import struct
+import time
+
+RESOLVER = "169.254.169.253"  # Route 53 Resolver, reachable from any VPC
+QTYPES = {"A": 1, "TXT": 16}
+CYCLE_SECONDS = 900
+
+MINING_POOL_NAMES = [
+    "xmr.nanopool.org",
+    "pool.supportxmr.com",
+    "gulf.moneroocean.stream",
+]
+
+
+def _label(n: int = 12) -> str:
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+
+def query(name: str, qtype: str = "A") -> None:
+    header = struct.pack(">HHHHHH", random.randint(0, 0xFFFF), 0x0100, 1, 0, 0, 0)
+    qname = b"".join(
+        bytes([len(part)]) + part.encode() for part in name.rstrip(".").split(".")
+    ) + b"\x00"
+    packet = header + qname + struct.pack(">HH", QTYPES[qtype], 1)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(2)
+    try:
+        sock.sendto(packet, (RESOLVER, 53))
+        sock.recv(512)
+    except OSError:
+        pass  # timeouts are fine; the query is logged either way
+    finally:
+        sock.close()
+
+
+def cycle() -> None:
+    for _ in range(80):
+        query(f"{_label()}.{_label(8)}.invalid")
+    for _ in range(150):
+        query(f"{_label(40)}.tunnel.detlab.invalid", "TXT")
+    for name in MINING_POOL_NAMES:
+        query(name)
+    query("detlabtest.onion")
+
+
+if __name__ == "__main__":
+    while True:
+        cycle()
+        time.sleep(CYCLE_SECONDS)
