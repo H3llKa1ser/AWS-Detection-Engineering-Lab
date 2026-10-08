@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.10.0: Sigma detection-as-code, CI
+
+### Added
+- `scripts/sigma_convert.py`: converts CloudTrail Sigma rules to CloudWatch
+  metric filters and Athena hunts, keeping Sigma semantics (case-insensitive,
+  absent-field rules, negation) and skipping, with reasons, what a target
+  cannot express. `--check` for CI.
+- `sigma/rules/aws/`: nine lab rules (GuardDuty disabled, S3 Block Public Access
+  removed, root access key, EC2 user data modified, unauthenticated Lambda URL,
+  SSM by a person, Secrets Manager policy, leaving the organization, console
+  sign-in outside known ranges). `sigma/generated/`: metric filters, hunts and
+  `REPORT.md`. `sigma/README.md`.
+- Detection catalogue accepts `extra_detections`; threat-hunting module accepts
+  `extra_query_dirs`. Root variables `enable_sigma`, `sigma_generated_dir`;
+  output `sigma`. Sigma hunts can be scheduled (`sigma_<rule>`).
+- `tests/sigma/test_sigma.py`: Python reference vs generated SQL (DuckDB) vs a
+  model of documented CloudWatch semantics; hand-written expectations,
+  fixtures for every construct and refusal, randomised differential testing.
+- `.github/workflows/tests.yml`: runs every offline suite, the Sigma freshness
+  check, ASL validation, and Terraform fmt/validate. Earlier docs referred to
+  "CI"; this is it.
+
+### Found by the new tests
+- A negated `|cidr` produced SQL whose comparison was NULL for non-IP source
+  addresses, which silently dropped those events. Every Athena leaf is now
+  two-valued.
+
 ## 0.9.0: IPv6
 
 ### Fixed

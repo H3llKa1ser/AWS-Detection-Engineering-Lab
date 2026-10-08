@@ -227,6 +227,25 @@ it over IPv6 (enable the CLI's dual-stack endpoints with
 region), and expect
 `retro/24_intel_cloudtrail_source_ip` after apply. Remove the row afterwards.
 
+## Sigma
+
+Offline: `python3 scripts/sigma_convert.py --check` and
+`python3 tests/sigma/test_sigma.py`.
+
+In the account: `terraform output sigma` lists the deployed metric filters and
+hunts. Safe triggers:
+
+- **Organization leave / root access key / GuardDuty** rules: do not trigger
+  these for real. Use the CloudWatch console's *Test pattern* on the metric
+  filter with a sample event instead (copy one from the rule's hand-written test
+  cases).
+- **Lambda function URL without auth**: create a throwaway function, add a URL
+  with auth type `NONE`, delete both. The `sigma_lambda_function_url_public`
+  alarm fires within about 5 minutes, and the hunt shows it after CloudTrail
+  delivers to S3.
+- **SSM by a person**: `aws ssm send-command` against any managed instance (or
+  even with a non-existent instance ID, which still records the call).
+
 ## Scheduled hunts
 
 ### Offline (no AWS)

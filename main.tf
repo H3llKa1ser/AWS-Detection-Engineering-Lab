@@ -74,6 +74,13 @@ module "lab_vpc" {
 }
 
 locals {
+  # Sigma rules (sigma/rules/) converted by scripts/sigma_convert.py into
+  # metric filters for the detection catalogue and Athena hunts.
+  sigma_dir            = "${path.root}/${var.sigma_generated_dir}"
+  sigma_metric_filters = var.enable_sigma ? jsondecode(file("${local.sigma_dir}/metric_filters.json")) : {}
+}
+
+locals {
   # Network log lake (Parquet in S3 + Athena). Name computed here so modules can
   # reference it without depending on each other.
   network_logs_bucket = "${var.name_prefix}-network-logs-${local.account_id}-${local.region}"
@@ -210,6 +217,7 @@ module "detections" {
 
   name_prefix         = var.name_prefix
   alarm_sns_topic_arn = module.alerting.alert_topic_arn
+  extra_detections    = local.sigma_metric_filters
 
   enabled_sources = concat(
     ["cloudtrail"],
@@ -245,6 +253,7 @@ module "threat_hunting" {
   bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
   scheduled_hunts        = var.enable_scheduled_hunts ? local.scheduled_hunt_list : []
   internal_cidrs         = local.internal_cidrs
+  extra_query_dirs       = var.enable_sigma ? ["${local.sigma_dir}/hunts"] : []
 
   available_sources = concat(
     ["cloudtrail"],

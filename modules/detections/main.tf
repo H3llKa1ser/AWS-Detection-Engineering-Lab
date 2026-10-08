@@ -9,7 +9,7 @@
 
 locals {
   all_detections = {
-    for name, d in merge(local.detections, local.network_detections) : name => {
+    for name, d in merge(local.detections, local.network_detections, var.extra_detections) : name => {
       source      = try(d.source, "cloudtrail")
       description = d.description
       attack      = d.attack

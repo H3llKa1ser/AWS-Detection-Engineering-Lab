@@ -210,7 +210,11 @@ resource "aws_athena_workgroup" "hunting" {
 #   -- attack: ...     (MITRE ATT&CK mapping)
 #   -- purpose: ...    (one-line description)
 locals {
-  query_files = fileset("${path.module}/queries", "*.sql")
+  # Hand-written hunts plus any extra directories (generated Sigma hunts).
+  query_paths = merge(
+    { for f in fileset("${path.module}/queries", "*.sql") : trimsuffix(f, ".sql") => "${path.module}/queries/${f}" },
+    merge([for d in var.extra_query_dirs : { for f in fileset(d, "*.sql") : trimsuffix(f, ".sql") => "${d}/${f}" }]...),
+  )
 
   # Shared SQL (modules/threat-hunting/sql/), tested in tests/hunts/test_ip_keys.py:
   #   ip_key        canonical 32-hex key for any IPv4/IPv6 text (placeholder IP_IN)
@@ -234,8 +238,8 @@ locals {
     }))
   }))
 
-  queries = { for f in local.query_files : trimsuffix(f, ".sql") => {
-    sql = templatefile("${path.module}/queries/${f}", {
+  queries = { for k, qp in local.query_paths : k => {
+    sql = templatefile(qp, {
       database      = local.database
       table         = local.table
       flow_table    = var.flow_table
@@ -247,15 +251,15 @@ locals {
       lookback_days = var.lookback_days
       recent_days   = var.recent_days
     })
-    requires = split(",", replace(try(regex("(?m)^-- requires:(.*)$", file("${path.module}/queries/${f}"))[0], "cloudtrail"), " ", ""))
-    raw      = file("${path.module}/queries/${f}")
-    title    = trimspace(regex("(?m)^-- title:(.*)$", file("${path.module}/queries/${f}"))[0])
-    attack   = trimspace(regex("(?m)^-- attack:(.*)$", file("${path.module}/queries/${f}"))[0])
-    purpose  = trimspace(regex("(?m)^-- purpose:(.*)$", file("${path.module}/queries/${f}"))[0])
+    requires = split(",", replace(try(regex("(?m)^-- requires:(.*)$", file(qp))[0], "cloudtrail"), " ", ""))
+    raw      = file(qp)
+    title    = trimspace(regex("(?m)^-- title:(.*)$", file(qp))[0])
+    attack   = trimspace(regex("(?m)^-- attack:(.*)$", file(qp))[0])
+    purpose  = trimspace(regex("(?m)^-- purpose:(.*)$", file(qp))[0])
 
     # Optional scheduling metadata; absent means "not schedulable" (e.g. pivots).
-    time_column = try(trimspace(regex("(?m)^-- schedule-time-column:(.*)$", file("${path.module}/queries/${f}"))[0]), null)
-    baseline    = try(trimspace(regex("(?m)^-- schedule-baseline:(.*)$", file("${path.module}/queries/${f}"))[0]) == "true", false)
+    time_column = try(trimspace(regex("(?m)^-- schedule-time-column:(.*)$", file(qp))[0]), null)
+    baseline    = try(trimspace(regex("(?m)^-- schedule-baseline:(.*)$", file(qp))[0]) == "true", false)
   } }
 
   # Only hunts whose tables exist are saved or schedulable.
@@ -274,7 +278,7 @@ locals {
       time_column = local.schedulable[k].time_column
       start_hours = 24 + var.schedule_lag_hours
       end_hours   = var.schedule_lag_hours
-      inner = trimspace(templatefile("${path.module}/queries/${k}.sql", {
+      inner = trimspace(templatefile(local.query_paths[k], {
         database      = local.database
         table         = local.table
         flow_table    = var.flow_table

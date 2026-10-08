@@ -321,3 +321,13 @@ for.
   second VPC IPv6 block in another account, on-premises), add the range to
   `extra_internal_cidrs` and apply; `terraform output internal_cidrs` shows what
   is currently treated as internal.
+
+## Sigma alarms and hunts
+
+A Sigma alarm is named `<prefix>-sigma_<rule>`; its description carries the
+rule title, level and ATT&CK technique. Triage starts from the rule:
+`sigma/rules/aws/<rule>.yml` lists its false positives, and the matching hunt
+`sigma_<rule>` in the workgroup shows every match over the lookback, with
+identity, source IP and request parameters. Tune a noisy rule by adding a
+`filter_*` selection to the YAML, re-running the converter and the tests, and
+applying; never by editing generated files.

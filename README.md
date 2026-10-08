@@ -28,6 +28,7 @@ architecture and infrastructure-as-code in one repo.
 | **Threat intelligence** | Curated IP/CIDR/domain indicators in git (`intel/`), validated, merged to a versioned S3 object and Athena table | Known-bad infrastructure matched against flows, DNS and CloudTrail, with automatic retro-hunts when indicators change |
 | **Threat hunting** | Glue tables over CloudTrail, flow, DNS logs and indicators (partition projection), Athena workgroup, 25 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-source joins |
 | **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch Recommended hunts for what is deployed (10-16) run daily over the last 24h; alerts only on findings or failures, each finding once |
+| **Sigma detection-as-code** | Sigma rules in `sigma/rules/` converted to metric filters and Athena hunts, with a coverage report | Write a detection once, run it in real time and over history; anything a target cannot express is reported, never approximated |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -214,6 +215,43 @@ name, so a small script asks the AWS CLI for them at plan time. Each resolved ID
 is then read through the provider and checked to really be that AWS-managed list
 before any rule uses it. Without the AWS CLI (e.g. in CI), pass the IDs in
 `dns_firewall_managed_list_ids`.
+
+## Detection-as-code with Sigma
+
+[Sigma](https://sigmahq.io/) is the vendor-neutral format detection engineers
+share rules in. `scripts/sigma_convert.py` turns CloudTrail Sigma rules in
+`sigma/rules/` into both of this lab's targets: **CloudWatch metric filters**
+(merged into the detection catalogue, with alarms) and **Athena hunts** (saved
+and schedulable as `sigma_<rule>`). Generated files live in `sigma/generated/`
+and are committed; CI fails if they are stale. Details and the supported subset:
+[sigma/README.md](sigma/README.md).
+
+The lab ships nine rules for gaps in the real-time catalogue: GuardDuty
+disabled, S3 Block Public Access removed, a root access key created, EC2 user
+data modified, an unauthenticated Lambda function URL, SSM commands or sessions
+started by a person, a Secrets Manager policy changed, an account leaving its
+organization, and console sign-ins from outside known ranges.
+[sigma/generated/REPORT.md](sigma/generated/REPORT.md) shows each one's targets:
+eight convert to both; the CIDR rule is Athena-only, because CloudWatch filters
+cannot match CIDRs.
+
+**Faithful, or not at all.** Sigma, Athena and CloudWatch disagree in places.
+Sigma is case-insensitive and treats a condition on an absent field as false
+(so `not` of it is true). SQL's NULL survives `NOT`. CloudWatch is
+case-sensitive, has `NOT EXISTS` but no `EXISTS`, and only allows wildcards at
+the edges of a value. The converter writes each target to keep Sigma's meaning
+(guarding every SQL comparison against NULL, and spelling out the absent case
+for CloudWatch's `!=`), and skips a target, with the reason, when it cannot.
+The one deliberate exception is CloudWatch's case sensitivity, which the report
+states for every rule it affects.
+
+**Tested three ways.** `tests/sigma/test_sigma.py` runs every rule through a
+Python reference implementation of Sigma, the generated SQL (in DuckDB) and a
+model of the documented CloudWatch filter semantics, on hand-written cases and
+hundreds of randomised events per rule, and requires all three to agree. That
+found a real bug during development: a negated `|cidr` dropped events whose
+source "IP" was not an IP (`AWS Internal`, a service name), because the SQL
+comparison was NULL. Ten planted converter bugs were each caught.
 
 ## Threat hunting with Athena
 
@@ -467,6 +505,7 @@ pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
 python3 tests/hunts/test_hunts.py && python3 tests/scheduled/test_state_machine.py
 python3 tests/intel/test_indicators.py   # curated indicators (standard library only)
 python3 tests/hunts/test_ip_keys.py      # IPv4/IPv6 key and range SQL vs Python ipaddress
+pip install -r tests/sigma/requirements.txt && python3 tests/sigma/test_sigma.py   # Sigma converter
 
 # 5. Run the scheduled hunts now instead of waiting for 06:00 UTC
 $(terraform output -raw run_scheduled_hunts_now)
@@ -534,6 +573,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
 │   ├── threat-intel/      # indicator validation + merge, versioned S3 object, Athena table
+├── sigma/                 # Sigma rules (rules/) and converter output (generated/: metric filters, hunts, REPORT.md)
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql), shared SQL (sql/)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
 │   ├── response/          # opt-in Lambda auto-response
@@ -541,6 +581,8 @@ removes them even with objects inside. (Remove that in any real deployment.)
 ├── tests/hunts/           # behavioural tests for the hunt queries and their scheduled variants (DuckDB, no AWS)
 ├── tests/scheduled/       # data-flow tests for the scheduled-hunts state machine (no AWS)
 ├── tests/intel/           # curation rules for intel/, merge mirror, feed importer tests
+├── tests/sigma/           # Sigma converter: three-way differential tests
+├── .github/workflows/     # CI: every offline test, Sigma freshness, Terraform fmt/validate
 ├── intel/                 # curated threat indicators (CSV) and the curation rules
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
@@ -556,7 +598,8 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail (7 network and cross-source hunts)
 - [x] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow, DNS and CloudTrail, with retro-hunts on change (25 tested hunts in total)
 - [x] IPv6 support for flow hunts and IP/CIDR indicators (canonical address keys; VPC-aware internal ranges)
-- [ ] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts
+- [x] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts (9 lab rules, coverage report, three-way differential tests)
+- [ ] Run the offline test suites against a live sandbox account in CI (apply, trigger, assert alarms and hunt results, destroy)
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

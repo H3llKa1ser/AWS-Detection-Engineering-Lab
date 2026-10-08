@@ -310,8 +310,8 @@ variable "scheduled_hunts" {
     error_message = "Each hunt may be scheduled only once."
   }
   validation {
-    condition     = try(alltrue([for h in var.scheduled_hunts : can(regex("^[0-9]{2}_[a-z0-9_]+$", h))]), true)
-    error_message = "Use query file names without .sql, e.g. 05_iam_persistence."
+    condition     = try(alltrue([for h in var.scheduled_hunts : can(regex("^([0-9]{2}|sigma)_[a-z0-9_]+$", h))]), true)
+    error_message = "Use query file names without .sql, e.g. 05_iam_persistence or sigma_ssm_command_by_human."
   }
 }
 
@@ -383,4 +383,18 @@ variable "extra_internal_cidrs" {
     condition     = alltrue([for c in var.extra_internal_cidrs : can(cidrhost(c, 0))])
     error_message = "Each extra_internal_cidrs entry must be an IPv4 or IPv6 CIDR."
   }
+}
+
+# --- Sigma detection-as-code -------------------------------------------------------------
+
+variable "enable_sigma" {
+  description = "Deploy the Sigma rules in sigma/rules/ as converted by scripts/sigma_convert.py: CloudWatch metric filters (with alarms) and Athena hunts."
+  type        = bool
+  default     = true
+}
+
+variable "sigma_generated_dir" {
+  description = "Converter output directory, relative to the root module."
+  type        = string
+  default     = "sigma/generated"
 }

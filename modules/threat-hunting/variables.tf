@@ -91,3 +91,9 @@ variable "internal_cidrs" {
   type        = list(string)
   default     = []
 }
+
+variable "extra_query_dirs" {
+  description = "Extra directories of hunt templates in the same format as queries/ (e.g. generated Sigma hunts)."
+  type        = list(string)
+  default     = []
+}

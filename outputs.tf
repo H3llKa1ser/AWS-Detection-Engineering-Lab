@@ -120,3 +120,11 @@ output "internal_cidrs" {
   description = "Ranges the network hunts treat as internal, on top of the built-in private and special ranges."
   value       = local.internal_cidrs
 }
+
+output "sigma" {
+  description = "Sigma rules deployed as CloudWatch metric filters and as Athena hunts (null when disabled)."
+  value = var.enable_sigma ? {
+    metric_filters = sort(keys(local.sigma_metric_filters))
+    hunts          = sort([for f in fileset("${local.sigma_dir}/hunts", "*.sql") : trimsuffix(f, ".sql")])
+  } : null
+}

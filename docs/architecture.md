@@ -488,3 +488,64 @@ offset, the partial-nibble mask) fails it. Hunt tests cover IPv6 textual
 variants, VPC-internal and ULA addresses, the last address of a /48 and the
 first outside it, AAAA answers, and IPv6 sweeps; removing the VPC IPv6 CIDR
 from the inputs fails hunts 18-20, which shows that discovery is load-bearing.
+
+## Sigma detection-as-code
+
+### Pipeline
+
+`sigma/rules/*.yml` → `scripts/sigma_convert.py` → `sigma/generated/`
+(`metric_filters.json`, `hunts/sigma_*.sql`, `REPORT.md`) → Terraform. The root
+module passes the metric filters to the detections module as
+`extra_detections` (same metric namespace, alarms and alert topic as the
+built-in catalogue) and the hunt directory to the threat-hunting module as an
+extra query directory (same rendering, saved queries, scheduling). Generated
+files are committed so a plan never depends on Python, and CI's
+`--check` step fails if they drift from the rules.
+
+### Why a purpose-built converter
+
+The CloudTrail subset of Sigma is small and well defined, the Athena field
+mapping is specific to this lab's table, and, as far as I know, there is no
+maintained CloudWatch-metric-filter backend for pySigma. A small converter with
+an explicit intermediate representation makes every semantic decision visible
+and testable. The trade-off is coverage: unsupported constructs are reported
+rather than converted.
+
+### Semantics, target by target
+
+| Concern | Sigma | Athena output | CloudWatch output |
+|---------|-------|---------------|-------------------|
+| Case | insensitive (unless `\|cased`) | `lower()` both sides | case-sensitive: CloudTrail casing assumed, stated in the report |
+| Absent field | condition false | `col IS NOT NULL AND ...` (never NULL) | `$.f = v` is false when absent |
+| `not` | true when the field is absent | `NOT` over two-valued leaves | De Morgan to the leaves; `($.f != v \|\| $.f NOT EXISTS \|\| $.f IS NULL)` |
+| Wildcards | `*`, `?`, `\` escapes | `LIKE ... ESCAPE '!'` (no backslashes: dialects disagree on them) | `*` at value edges only |
+| `null` / exists | absent or null | `IS NULL` / `IS NOT NULL` | `NOT EXISTS \|\| IS NULL`; "exists" not expressible |
+| `\|cidr` | IP in network | shared `ip_key` ranges, `coalesce(..., FALSE)` | not expressible |
+| `\|re` | regex search | `regexp_like` (`(?i)` for `\|i`) | not converted (CloudWatch regex is a restricted dialect) |
+| Length | - | - | patterns over 1024 characters skipped |
+
+### Field mapping
+
+Sigma uses raw CloudTrail field names (`userIdentity.type`,
+`requestParameters.policyArn`). For Athena, top-level fields map to the
+table's lower-case columns, `userIdentity`/`tlsDetails`/`addendum` paths to
+struct fields (validated against the Glue type; a test fails if the converter's
+map and the table drift apart), and `requestParameters`/`responseElements`/
+`additionalEventData` paths to `json_extract_scalar`. Array fields
+(`resources`) are refused for both targets: a CloudWatch selector on an array
+never matches, so converting it would be a silent false negative.
+
+### Testing
+
+Three implementations per rule: a Python reference interpreter of Sigma over
+raw CloudTrail JSON, the generated SQL in DuckDB, and an independent parser and
+evaluator of the generated CloudWatch pattern text following the documented
+semantics (case-sensitive, edge wildcards, `IS NULL`/`NOT EXISTS`, no match on
+objects or arrays). Each lab rule has hand-written expectations; fixture rules
+cover every supported construct and every refusal; randomised events (absent,
+null, matching, near-miss, wildcard-confusing and case-flipped values) must give
+identical results, except case-flipped events for CloudWatch, which a dedicated
+test asserts differ. Because all three share the parsed rule, parser bugs are
+caught by the hand-written expectations rather than by the differential
+comparison. Ten planted converter bugs were all caught. Limits: CloudWatch is
+modelled from its documentation, not executed.
