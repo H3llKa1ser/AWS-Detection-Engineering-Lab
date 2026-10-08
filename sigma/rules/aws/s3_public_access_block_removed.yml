@@ -1,0 +1,25 @@
+title: S3 Public Access Block Removed
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e02
+status: experimental
+description: A bucket- or account-level S3 Block Public Access configuration was deleted, the usual first step before exposing data publicly.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.exfiltration
+  - attack.t1537
+  - attack.defense-evasion
+  - attack.t1562
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource:
+      - s3.amazonaws.com
+      - s3-control.amazonaws.com
+    eventName|startswith: Delete
+    eventName|endswith: PublicAccessBlock
+  condition: selection
+falsepositives:
+  - Buckets intentionally made public (static websites behind review)
+level: high

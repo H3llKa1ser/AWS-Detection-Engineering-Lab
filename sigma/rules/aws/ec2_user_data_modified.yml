@@ -1,0 +1,22 @@
+title: EC2 Instance User Data Modified
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e04
+status: experimental
+description: An instance's user data was changed. User data runs as root at boot, so changing it is a quiet way to plant code that runs on the next restart.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.persistence
+  - attack.t1037
+  - attack.execution
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: ec2.amazonaws.com
+    eventName: ModifyInstanceAttribute
+    requestParameters.userData: '*'
+  condition: selection
+falsepositives:
+  - Configuration management that rewrites user data (should be rare and attributable)
+level: medium

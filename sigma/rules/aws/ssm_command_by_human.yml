@@ -1,0 +1,24 @@
+title: SSM Command or Session Started by a Person
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e06
+status: experimental
+description: Systems Manager ran a command or opened a session on instances on behalf of a human principal rather than an AWS service, which is how an attacker with console or API access gets a shell.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.execution
+  - attack.t1651
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: ssm.amazonaws.com
+    eventName:
+      - SendCommand
+      - StartSession
+  filter_aws_service:
+    userIdentity.invokedBy|endswith: .amazonaws.com
+  condition: selection and not filter_aws_service
+falsepositives:
+  - Administrators using Session Manager instead of SSH (the point is to make it attributable)
+level: medium

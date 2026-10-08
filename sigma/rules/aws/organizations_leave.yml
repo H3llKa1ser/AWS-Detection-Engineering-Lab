@@ -1,0 +1,20 @@
+title: Account Left Its AWS Organization
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e08
+status: experimental
+description: An account left its organization, escaping service control policies, organization CloudTrail and central security tooling.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.defense-evasion
+  - attack.t1666
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: organizations.amazonaws.com
+    eventName: LeaveOrganization
+  condition: selection
+falsepositives:
+  - Planned account divestment
+level: critical

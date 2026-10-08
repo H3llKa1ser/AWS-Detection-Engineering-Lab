@@ -1,0 +1,58 @@
+{
+  "sigma_ec2_user_data_modified": {
+    "attack": "T1037",
+    "description": "Sigma: EC2 Instance User Data Modified (medium)",
+    "pattern": "{ (($.eventSource = \"ec2.amazonaws.com\") && ($.eventName = \"ModifyInstanceAttribute\") && ($.requestParameters.userData = \"*\")) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_guardduty_detector_disabled": {
+    "attack": "T1562.001",
+    "description": "Sigma: GuardDuty Detector Deleted or Disabled (high)",
+    "pattern": "{ ((($.eventSource = \"guardduty.amazonaws.com\") && ($.eventName = \"DeleteDetector\")) || (($.eventSource = \"guardduty.amazonaws.com\") && ($.eventName = \"UpdateDetector\") && ($.requestParameters.enable IS FALSE))) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_iam_root_access_key_created": {
+    "attack": "T1098.001",
+    "description": "Sigma: Access Key Created for the Root User (critical)",
+    "pattern": "{ (($.eventSource = \"iam.amazonaws.com\") && ($.eventName = \"CreateAccessKey\") && ($.userIdentity.type = \"Root\")) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_lambda_function_url_public": {
+    "attack": "T1190",
+    "description": "Sigma: Lambda Function URL Created Without Authentication (medium)",
+    "pattern": "{ (($.eventSource = \"lambda.amazonaws.com\") && (($.eventName = \"CreateFunctionUrlConfig*\") || ($.eventName = \"UpdateFunctionUrlConfig*\")) && ($.requestParameters.authType = \"NONE\")) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_organizations_leave": {
+    "attack": "T1666",
+    "description": "Sigma: Account Left Its AWS Organization (critical)",
+    "pattern": "{ (($.eventSource = \"organizations.amazonaws.com\") && ($.eventName = \"LeaveOrganization\")) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_s3_public_access_block_removed": {
+    "attack": "T1537 / T1562",
+    "description": "Sigma: S3 Public Access Block Removed (high)",
+    "pattern": "{ ((($.eventSource = \"s3.amazonaws.com\") || ($.eventSource = \"s3-control.amazonaws.com\")) && ($.eventName = \"Delete*\") && ($.eventName = \"*PublicAccessBlock\")) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_secretsmanager_resource_policy_changed": {
+    "attack": "T1098 / T1555.006",
+    "description": "Sigma: Secrets Manager Resource Policy Changed (medium)",
+    "pattern": "{ ((($.eventSource = \"secretsmanager.amazonaws.com\") && (($.eventName = \"PutResourcePolicy\") || ($.eventName = \"DeleteResourcePolicy\"))) && ($.errorCode != \"*\" || $.errorCode NOT EXISTS || $.errorCode IS NULL)) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  },
+  "sigma_ssm_command_by_human": {
+    "attack": "T1651",
+    "description": "Sigma: SSM Command or Session Started by a Person (medium)",
+    "pattern": "{ ((($.eventSource = \"ssm.amazonaws.com\") && (($.eventName = \"SendCommand\") || ($.eventName = \"StartSession\"))) && ($.userIdentity.invokedBy != \"*.amazonaws.com\" || $.userIdentity.invokedBy NOT EXISTS || $.userIdentity.invokedBy IS NULL)) }",
+    "source": "cloudtrail",
+    "threshold": 1
+  }
+}

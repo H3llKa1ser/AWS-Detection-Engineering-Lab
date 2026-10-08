@@ -1,0 +1,24 @@
+title: Lambda Function URL Created Without Authentication
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e05
+status: experimental
+description: A Lambda function URL was created or changed with auth type NONE, exposing the function to the internet without IAM authentication.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.persistence
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: lambda.amazonaws.com
+    eventName|startswith:
+      - CreateFunctionUrlConfig
+      - UpdateFunctionUrlConfig
+    requestParameters.authType: NONE
+  condition: selection
+falsepositives:
+  - Public webhooks that validate requests themselves
+level: medium

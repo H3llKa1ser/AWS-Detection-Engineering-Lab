@@ -1,0 +1,24 @@
+title: Console Sign-In From Outside Known Ranges
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e09
+status: experimental
+description: A successful console sign-in came from an address outside the organisation's known ranges. Edit the ranges to your own (the defaults are documentation ranges). Athena-only by design, since CloudWatch filters cannot match CIDRs.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.initial-access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventName: ConsoleLogin
+    responseElements.ConsoleLogin: Success
+  filter_known:
+    sourceIPAddress|cidr:
+      - 192.0.2.0/24
+      - 2001:db8::/32
+  condition: selection and not filter_known
+falsepositives:
+  - Staff travelling or working from home without the corporate VPN
+level: medium

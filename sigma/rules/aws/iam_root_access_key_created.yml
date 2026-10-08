@@ -1,0 +1,21 @@
+title: Access Key Created for the Root User
+id: 6d0f5b4e-9a8f-4a52-8f3c-2b6f0c1d7e03
+status: experimental
+description: The root user created an access key. Root access keys are almost never legitimate and give unrestricted, hard-to-scope programmatic access.
+author: AWS Detection Engineering Lab
+date: 2026-10-08
+tags:
+  - attack.persistence
+  - attack.t1098.001
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: iam.amazonaws.com
+    eventName: CreateAccessKey
+    userIdentity.type: Root
+  condition: selection
+falsepositives:
+  - None expected
+level: critical
