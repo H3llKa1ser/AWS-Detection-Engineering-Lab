@@ -73,22 +73,17 @@ hunting_bytes_scanned_cutoff = 10737418240 # 10 GiB per query
 enable_scheduled_hunts = true
 hunt_schedule_hour     = 6
 hunt_schedule_timezone = "UTC"
-scheduled_hunts = [
-  "01_console_login_new_source",
-  "02_console_bruteforce_then_success",
-  "03_permission_probing",
-  "05_iam_persistence",
-  "06_defense_evasion_sensor_tampering",
-  "07_new_region_activity",
-  "08_data_shared_to_other_accounts",
-  "09_compute_hijacking",
-  "12_root_activity",
-  "13_new_role_assumption_path",
-  # Add once tuned for your environment:
-  # "04_enumeration_burst", "10_secret_harvesting", "11_instance_credentials_replayed",
-]
+scheduled_hunts = null # recommended set for what is deployed; or list names, e.g.
+# ["05_iam_persistence", "06_defense_evasion_sensor_tampering", "24_intel_cloudtrail_source_ip"]
 
 # --- Network log lake (flow + DNS as Parquet in S3, Athena tables, network hunts) ---
 # Adds a second flow log per monitored VPC; AWS allows 2 per VPC.
 enable_network_log_lake     = true
 network_lake_retention_days = 90
+
+# --- Threat intel (curated indicators in intel/indicators/*.csv) ---
+enable_threat_intel        = true
+retro_hunt_on_intel_change = true
+
+# The daily schedule defaults to a recommended set for what is deployed.
+# Set an explicit list (like the one above) to override it, or null to keep it.

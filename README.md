@@ -25,8 +25,9 @@ architecture and infrastructure-as-code in one repo.
 | **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists, custom block/allow lists, and DNS Firewall Advanced (DGA, dictionary DGA, tunnelling) | Prevention: known-bad domains *and* never-seen-before DGA/tunnelling traffic get no answer; every verdict is logged |
 | **Detection-as-code** | 26 metric-filter alarms over CloudTrail, flow and DNS logs, plus 3 EventBridge-driven alarms for DNS Firewall Advanced | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
 | **Network log lake** | VPC Flow Logs (native Parquet) and Resolver query logs (Firehose → Parquet) in S3, with Athena tables | Months of network and DNS history, cheap to keep and to scan, joinable with CloudTrail |
-| **Threat hunting** | Glue tables over CloudTrail, flow and DNS logs (partition projection), Athena workgroup, 21 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-source joins |
-| **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch | 10 hunts run daily over the last 24h; alerts only on findings or failures, each finding once |
+| **Threat intelligence** | Curated IP/CIDR/domain indicators in git (`intel/`), validated, merged to a versioned S3 object and Athena table | Known-bad infrastructure matched against flows, DNS and CloudTrail, with automatic retro-hunts when indicators change |
+| **Threat hunting** | Glue tables over CloudTrail, flow, DNS logs and indicators (partition projection), Athena workgroup, 25 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-source joins |
+| **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch Recommended hunts for what is deployed (10-16) run daily over the last 24h; alerts only on findings or failures, each finding once |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -62,7 +63,9 @@ flowchart LR
     CWL -->|metric filters| ALM[26 Metric-filter Alarms]
     EB -->|MatchedEvents alarms| SNS
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
-    S3 -->|read in place| ATH[Athena + Glue<br/>21 saved hunts]
+    S3 -->|read in place| ATH[Athena + Glue<br/>25 saved hunts]
+    TI[intel/indicators/*.csv<br/>reviewed in git] -->|validate + merge| IO[(S3 indicator set<br/>versioned)] --> ATH
+    IO -->|Object Created| SFN
     SCH[Scheduler, daily] --> SFN[Step Functions] -->|scheduled variants| ATH
     SFN -->|findings / failures| SNS
 
@@ -226,7 +229,7 @@ in S3 rather than the CloudWatch stream. The `threat-hunting` module adds:
 - **An Athena workgroup** (engine v3) whose settings are enforced: results go
   only to a dedicated bucket, encrypted with the lab CMK, expiring after 30 days,
   and any single query is cancelled past a scan cap (default 10 GiB).
-- **21 saved queries** in that workgroup, each mapped to ATT&CK. 01-14 use CloudTrail; 15-21 use the network log lake (below):
+- **25 saved queries** in that workgroup, each mapped to ATT&CK. 01-14 use CloudTrail; 15-21 use the network log lake; 22-25 use threat intelligence (both below):
 
 | # | Hunt | What it finds | MITRE ATT&CK |
 |---|------|---------------|--------------|
@@ -251,6 +254,10 @@ in S3 rather than the CloudWatch stream. The `threat-hunting` module adds:
 | 19 | Internal sweep | One host contacting 20+ internal hosts or 50+ ports in an hour | T1046 / TA0008 |
 | 20 | Egress without DNS | Connections to public IPs the instance never resolved (flow ⨝ DNS): hard-coded C2 | TA0011 / T1071 |
 | 21 | Investigate an instance | One timeline across CloudTrail, DNS and flows for an instance (pivot) | - |
+| 22 | Intel: flows | Traffic to or from indicator IPs/CIDRs, per direction, accepted vs rejected | TA0011 / TA0010 |
+| 23 | Intel: DNS | Lookups of indicator domains (and subdomains) or answers pointing at indicator IPs, with DNS Firewall verdict | TA0011 / T1071.004 |
+| 24 | Intel: CloudTrail | API calls and sign-ins from indicator IPs: valid credentials in hostile hands | T1078.004 / TA0001 |
+| 25 | Intel inventory | Active, expiring and expired indicators per source (hygiene report) | - |
 
 - **A hunter IAM policy** (`hunter_policy_arn` output) to attach to the people
   who hunt: run queries in this workgroup, read the catalog, **read-only** on
@@ -284,8 +291,47 @@ Two things to know: AWS allows **2 flow logs per VPC**, and this adds the
 second; a monitored VPC that already has a flow log elsewhere will fail to apply
 (set `enable_network_log_lake = false`, or remove the other flow log). And DNS
 records reach S3 when Firehose's buffer flushes, every 5 minutes by default.
-The network hunts are not in the default daily schedule (it must work with the
-lake off); add 15-20 to `scheduled_hunts` once the lake is on.
+With the lake on, the recommended daily schedule adds the network hunts least
+likely to need tuning (17, 18, 20); see Scheduled hunts.
+
+### Threat intelligence (curated indicators)
+
+Detections and hunts look for behaviour. Intel adds the other half: *who* is
+known to be bad. The design treats indicators as code, because unreviewed,
+never-expiring intel is the main source of false positives in threat-intel
+programmes:
+
+- **Curated in git.** `intel/indicators/*.csv` (format and rules in
+  [intel/README.md](intel/README.md)): indicator, type (`ipv4`, `cidr`,
+  `domain`), source, confidence, added, **expires**, description, reference.
+  Changes are pull requests; the git history records what you believed and why.
+- **Validated twice.** `tests/intel/test_indicators.py` (CI) enforces the full
+  rules: real address parsing, no internal or reserved ranges, no CIDR wider
+  than /16, no platform apex domains (subdomain matching would turn
+  `amazonaws.com` into "everything"), aligned CIDRs, no duplicates, lifetimes
+  capped. Terraform re-checks the essentials at plan time and refuses to upload
+  a broken set.
+- **One versioned object.** Terraform merges every file into a single sorted CSV
+  in a versioned, KMS-encrypted bucket, behind the `threat_indicators` table.
+  Sorting means re-ordering rows changes nothing; versioning keeps every set
+  ever applied.
+- **Matching.** IPs and CIDRs become integer ranges, so one comparison covers
+  both; domains match themselves and subdomains on a dot boundary (`evil.com`
+  matches `a.evil.com`, never `notevil.com`); expired indicators stop matching.
+  Hunt 22 checks flow endpoints, 23 checks DNS queries *and the IPs they
+  resolved to*, 24 checks CloudTrail source IPs.
+- **Retro-hunting.** A new indicator should be checked against history, not just
+  tomorrow's traffic. Uploading a changed set emits one S3 event; EventBridge
+  starts the scheduled-hunts state machine with full-lookback variants of 22-24
+  (`retro/...` saved queries). Alerts arrive as `hunt findings: retro/<hunt>`.
+  The daily runs then cover new traffic.
+- **A canary proves it end to end.** `lab-canaries.csv` lists
+  `intel-canary.invalid`; the traffic generator resolves
+  `beacon.intel-canary.invalid` every cycle, so hunt 23 has something real to
+  find. A test runs the real curated files through the merge and the hunt.
+- **Real feeds, carefully.** `scripts/import_feodo.py` imports abuse.ch's Feodo
+  Tracker botnet C2 list into `feodotracker.csv` with a 30-day expiry for
+  review. IPv6 indicators are not supported yet.
 
 **The hunts are tested.** `tests/hunts/test_hunts.py` renders each query the way
 Terraform does, transpiles it to DuckDB and runs it against synthetic CloudTrail
@@ -307,9 +353,12 @@ aws athena list-named-queries --work-group detlab-threat-hunting
 
 ### Scheduled hunts
 
-Hunts nobody runs find nothing. Ten of them run every day at 06:00 UTC (choose
-with `scheduled_hunts`, `hunt_schedule_hour`), and the alert topic hears about it
-only when one returns rows or fails to run. Three design decisions keep that
+Hunts nobody runs find nothing. A recommended set runs every day at 06:00 UTC,
+and the alert topic hears about it only when one returns rows or fails to run.
+`scheduled_hunts = null` (the default) picks the set from what is deployed: ten
+CloudTrail hunts, plus 17, 18 and 20 with the network log lake, plus 22-24 with
+threat intel (10 to 16 hunts). Set an explicit list to override it, and
+`hunt_schedule_hour` to move it. Three design decisions keep that
 signal clean:
 
 - **Each finding is reported once.** A saved hunt looks back 30 days, so running
@@ -332,8 +381,10 @@ signal clean:
 Step Functions runs the *saved* queries through its native Athena and SNS
 integrations: no Lambda code, and the schedule runs exactly what a hunter sees
 in the workgroup. It uses the hunter IAM policy plus `sns:Publish`, nothing more.
-Hunts 04, 10 and 11 are not scheduled by default: they usually need tuning for
-your environment first (CSPM tools, apps reading many secrets, NAT changes).
+Hunts 04, 10, 11, 15, 16 and 19 are not recommended by default: they usually
+need tuning for your environment first (CSPM tools, apps reading many secrets,
+NAT changes, agents that poll on timers, new SaaS, scanners). The same machine
+also runs the intel retro-hunts described above.
 
 Run the schedule now, with its exact input:
 
@@ -388,6 +439,7 @@ terraform apply -var deploy_traffic_generator=true
 # 4. Prove the threat-hunting queries and the scheduler work, offline, no AWS needed
 pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
 python3 tests/hunts/test_hunts.py && python3 tests/scheduled/test_state_machine.py
+python3 tests/intel/test_indicators.py   # curated indicators (standard library only)
 
 # 5. Run the scheduled hunts now instead of waiting for 06:00 UTC
 $(terraform output -raw run_scheduled_hunts_now)
@@ -454,12 +506,15 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── detections/        # detection-as-code catalogue (metric filters)
 │   ├── alerting/          # SNS + EventBridge routing
 │   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
+│   ├── threat-intel/      # indicator validation + merge, versioned S3 object, Athena table
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
 │   ├── response/          # opt-in Lambda auto-response
 │   └── traffic-generator/ # opt-in DNS traffic generator instance
 ├── tests/hunts/           # behavioural tests for the hunt queries and their scheduled variants (DuckDB, no AWS)
 ├── tests/scheduled/       # data-flow tests for the scheduled-hunts state machine (no AWS)
+├── tests/intel/           # curation rules for intel/, merge mirror, feed importer tests
+├── intel/                 # curated threat indicators (CSV) and the curation rules
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
 ```
@@ -471,8 +526,9 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] DNS Firewall Advanced (native DGA, dictionary-DGA and DNS-tunnelling rules), via `hashicorp/aws` 6.x
 - [x] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries
 - [x] Scheduled hunts: run selected saved queries daily and alert on non-empty results (once per finding, with a dead man's switch)
-- [x] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail (7 network and cross-source hunts; 21 tested hunts in total)
-- [ ] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow and DNS
+- [x] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail (7 network and cross-source hunts)
+- [x] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow, DNS and CloudTrail, with retro-hunts on change (25 tested hunts in total)
+- [ ] IPv6 support for flow hunts and IP/CIDR indicators
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

@@ -301,27 +301,16 @@ variable "enable_scheduled_hunts" {
 }
 
 variable "scheduled_hunts" {
-  description = "Hunts to run daily (query file names without .sql). The default leaves out 04, 10 and 11, which usually need tuning to your environment first."
+  description = "Hunts to run daily (query file names without .sql). null (default) means the recommended set for what is deployed: ten CloudTrail hunts, plus 17/18/20 with the network log lake, plus 22-24 with threat intel. 04, 10, 11, 15, 16 and 19 usually need tuning to your environment before scheduling."
   type        = list(string)
-  default = [
-    "01_console_login_new_source",
-    "02_console_bruteforce_then_success",
-    "03_permission_probing",
-    "05_iam_persistence",
-    "06_defense_evasion_sensor_tampering",
-    "07_new_region_activity",
-    "08_data_shared_to_other_accounts",
-    "09_compute_hijacking",
-    "12_root_activity",
-    "13_new_role_assumption_path",
-  ]
+  default     = null
 
   validation {
-    condition     = length(distinct(var.scheduled_hunts)) == length(var.scheduled_hunts)
+    condition     = try(length(distinct(var.scheduled_hunts)) == length(var.scheduled_hunts), true)
     error_message = "Each hunt may be scheduled only once."
   }
   validation {
-    condition     = alltrue([for h in var.scheduled_hunts : can(regex("^[0-9]{2}_[a-z0-9_]+$", h))])
+    condition     = try(alltrue([for h in var.scheduled_hunts : can(regex("^[0-9]{2}_[a-z0-9_]+$", h))]), true)
     error_message = "Use query file names without .sql, e.g. 05_iam_persistence."
   }
 }
@@ -355,4 +344,24 @@ variable "network_lake_retention_days" {
   description = "Days flow and DNS Parquet files are kept in S3 (CloudWatch copies keep network_log_retention_days)."
   type        = number
   default     = 90
+}
+
+# --- Threat intelligence ----------------------------------------------------------------
+
+variable "enable_threat_intel" {
+  description = "Publish the curated indicators in intel/indicators/ as an Athena table and deploy the intel hunts (22-25). Needs enable_threat_hunting."
+  type        = bool
+  default     = true
+}
+
+variable "intel_indicator_dir" {
+  description = "Directory of curated indicator CSVs, relative to the root module."
+  type        = string
+  default     = "intel/indicators"
+}
+
+variable "retro_hunt_on_intel_change" {
+  description = "When the indicator set changes, re-run the intel hunts once over the full lookback (needs scheduled hunts)."
+  type        = bool
+  default     = true
 }

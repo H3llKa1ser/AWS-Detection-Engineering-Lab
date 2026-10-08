@@ -79,6 +79,27 @@ locals {
   lake_flow           = var.enable_network_log_lake && var.enable_threat_hunting && var.enable_vpc_flow_logs
   lake_dns            = var.enable_network_log_lake && var.enable_threat_hunting && var.enable_dns_query_logging
   lake                = local.lake_flow || local.lake_dns
+
+  # Threat intel (curated indicators -> Athena table -> intel hunts).
+  intel_bucket = "${var.name_prefix}-threat-intel-${local.account_id}-${local.region}"
+  intel        = var.enable_threat_intel && var.enable_threat_hunting
+
+  # Recommended daily schedule for what is deployed (used when scheduled_hunts = null).
+  base_hunts = [
+    "01_console_login_new_source", "02_console_bruteforce_then_success", "03_permission_probing",
+    "05_iam_persistence", "06_defense_evasion_sensor_tampering", "07_new_region_activity",
+    "08_data_shared_to_other_accounts", "09_compute_hijacking", "12_root_activity", "13_new_role_assumption_path",
+  ]
+  recommended_hunts = concat(
+    local.base_hunts,
+    local.lake_dns ? ["17_dns_tunnel_shape"] : [],
+    local.lake_flow ? ["18_flow_new_external_transfer"] : [],
+    local.lake_flow && local.lake_dns ? ["20_flow_egress_without_dns"] : [],
+    local.intel && local.lake_flow ? ["22_intel_flow_matches"] : [],
+    local.intel && local.lake_dns ? ["23_intel_dns_matches"] : [],
+    local.intel ? ["24_intel_cloudtrail_source_ip"] : [],
+  )
+  scheduled_hunt_list = var.scheduled_hunts == null ? local.recommended_hunts : var.scheduled_hunts
 }
 
 locals {
@@ -204,13 +225,15 @@ module "threat_hunting" {
   lookback_days          = var.hunting_lookback_days
   recent_days            = var.hunting_recent_days
   bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
-  scheduled_hunts        = var.enable_scheduled_hunts ? var.scheduled_hunts : []
+  scheduled_hunts        = var.enable_scheduled_hunts ? local.scheduled_hunt_list : []
 
   available_sources = concat(
     ["cloudtrail"],
     local.lake_flow ? ["flow"] : [],
     local.lake_dns ? ["dns"] : [],
+    local.intel ? ["intel"] : [],
   )
+  intel_bucket_arn        = local.intel ? "arn:${local.partition}:s3:::${local.intel_bucket}" : null
   network_logs_bucket_arn = local.lake ? "arn:${local.partition}:s3:::${local.network_logs_bucket}" : null
 }
 
@@ -233,10 +256,30 @@ module "network_log_lake" {
   retention_days   = var.network_lake_retention_days
 }
 
-# 9. Scheduled hunts: run selected saved hunts daily, alert only on findings.
+# 8c. Threat intel: curated indicators as an Athena table in the hunting database.
+module "threat_intel" {
+  source = "./modules/threat-intel"
+  count  = local.intel ? 1 : 0
+
+  name_prefix   = var.name_prefix
+  account_id    = local.account_id
+  partition     = local.partition
+  region        = local.region
+  bucket_name   = local.intel_bucket
+  kms_key_arn   = module.logging.kms_key_arn
+  database_name = module.threat_hunting[0].database
+  indicator_dir = "${path.root}/${var.intel_indicator_dir}"
+
+  # Upload indicators only after the retro-hunt rule (and the retro queries it
+  # runs) exist; otherwise the first retro-hunt is silently missed.
+  depends_on = [module.scheduled_hunts]
+}
+
+# 9. Scheduled hunts: run selected saved hunts daily, alert only on findings;
+#    retro-hunt intel hunts when the indicator set changes.
 module "scheduled_hunts" {
   source = "./modules/scheduled-hunts"
-  count  = var.enable_threat_hunting && var.enable_scheduled_hunts && length(var.scheduled_hunts) > 0 ? 1 : 0
+  count  = var.enable_threat_hunting && var.enable_scheduled_hunts && length(local.scheduled_hunt_list) > 0 ? 1 : 0
 
   name_prefix       = var.name_prefix
   account_id        = local.account_id
@@ -247,6 +290,17 @@ module "scheduled_hunts" {
   alert_topic_arn   = module.alerting.alert_topic_arn
   schedule_hour     = var.hunt_schedule_hour
   schedule_timezone = var.hunt_schedule_timezone
+
+  enable_retro      = local.intel && var.retro_hunt_on_intel_change
+  retro_hunts       = local.intel ? module.threat_hunting[0].retro_hunts : {}
+  intel_bucket_name = local.intel ? local.intel_bucket : null
+}
+
+check "retro_hunts_need_scheduler" {
+  assert {
+    condition     = !(local.intel && var.retro_hunt_on_intel_change) || (var.enable_scheduled_hunts && length(local.scheduled_hunt_list) > 0)
+    error_message = "Retro-hunting on intel changes uses the scheduled-hunts state machine, which is not deployed (enable_scheduled_hunts = false or no hunts scheduled). New indicators will only match new traffic."
+  }
 }
 
 check "scheduled_hunts_need_hunting" {

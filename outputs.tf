@@ -106,3 +106,12 @@ output "network_log_lake" {
     dns_table  = local.lake_dns ? "${module.threat_hunting[0].database}.${module.network_log_lake[0].dns_table}" : null
   } : null
 }
+
+output "threat_intel" {
+  description = "Indicator table and counts per source in the applied set (null when intel is off)."
+  value = local.intel ? {
+    table      = "${module.threat_hunting[0].database}.${module.threat_intel[0].table}"
+    by_source  = module.threat_intel[0].indicators_by_source
+    retro_rule = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].retro_trigger : null
+  } : null
+}

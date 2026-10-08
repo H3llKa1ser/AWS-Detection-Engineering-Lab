@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.0: Threat intelligence and retro-hunting
+
+### Added
+- `intel/indicators/*.csv`: curated indicators as code (indicator, type,
+  source, confidence, added, expires, description, reference) with
+  `intel/README.md` rules; `lab-canaries.csv` seed (documentation ranges and a
+  `.invalid` canary domain only, no real indicators).
+- `modules/threat-intel`: plan-time validation, deterministic merge into one
+  versioned, KMS-encrypted S3 object, `threat_indicators` Athena table, S3
+  events to EventBridge.
+- Hunts 22-25: intel matches in flows, DNS (names, subdomains and resolved
+  IPs) and CloudTrail source IPs; intel inventory report. Shared
+  `intel_active` CTE: expiry filter, IPv4/CIDR as integer ranges.
+- Retro-hunting: `retro/...` full-lookback variants of 22-24, run by the
+  scheduled-hunts state machine whenever the indicator object changes.
+- `scripts/import_feodo.py`: Feodo Tracker botnet C2 importer with short expiry.
+- `tests/intel/`: curation rules, merge mirror (byte-identical to Terraform),
+  importer tests. Hunt tests for 22-25, retro coverage, and the curated canary
+  matched end to end. Mutation-checked range, expiry and domain-boundary logic.
+- Traffic generator resolves the intel canary every cycle.
+- Root variables `enable_threat_intel`, `intel_indicator_dir`,
+  `retro_hunt_on_intel_change`; output `threat_intel`.
+
+### Changed
+- `scheduled_hunts` now defaults to `null`: a recommended set computed from the
+  deployed layers (10-16 hunts), instead of a fixed CloudTrail-only list. An
+  explicit list still overrides it. Validated for every on/off combination.
+- Hunter policy reads the intel prefix (including object versions).
+
 ## 0.7.0: Network log lake (flow and DNS in Parquet) and network hunts
 
 ### Added
