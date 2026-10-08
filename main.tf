@@ -42,9 +42,11 @@ module "config" {
 module "threat_detection" {
   source = "./modules/threat-detection"
 
-  name_prefix        = var.name_prefix
-  enable_guardduty   = var.enable_guardduty
-  enable_securityhub = var.enable_securityhub
+  name_prefix = var.name_prefix
+  # In an organization (org/), the delegated administrator enables and configures
+  # GuardDuty and Security Hub in this account; creating them here would conflict.
+  enable_guardduty   = var.enable_guardduty && !var.organization_managed_threat_detection
+  enable_securityhub = var.enable_securityhub && !var.organization_managed_threat_detection
   partition          = local.partition
   region             = local.region
 }

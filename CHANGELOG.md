@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.13.0: Multi-account delegated administrator
+
+### Added
+- `org/management` and `modules/org-delegation`: GuardDuty trusted access (one
+  idempotent CLI call, since GuardDuty needs it before an API-designated admin
+  and `hashicorp/aws` could only do it by owning the whole organization),
+  GuardDuty delegated administrator in every region, Security Hub enabled in the
+  management account and delegated in the home region. Both delegations have
+  `prevent_destroy`.
+- `org/security-admin` and `modules/org-security-admin`: GuardDuty detector,
+  organization configuration (auto-enable `ALL`) and protection plans in every
+  region; Security Hub central configuration (finding aggregator, `CENTRAL`,
+  configuration policy with FSBP and CIS 1.4.0, associations); alerting for
+  every account and region through the existing alerting module. Uses the
+  `hashicorp/aws` 6.x per-resource `region` argument instead of provider aliases.
+- Variable `organization_managed_threat_detection` for member accounts running
+  the lab.
+- `scripts/verify_org.py`: checks a real organization after apply.
+- Tests: `tests/org/test_org_plans.py` (offline plans of both roots, assertions
+  on resources, ordering, validation and `prevent_destroy`; seven planted
+  mistakes caught) and `tests/org/test_verify_org.py`. CI validates every root.
+- `docs/multi-account.md`.
+
+### Not yet done
+- Not applied to a real organization by the author.
+
 ## 0.12.0: Sigma to CloudWatch Logs Insights (second real-time path)
 
 ### Added

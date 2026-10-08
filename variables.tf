@@ -426,3 +426,9 @@ variable "sigma_log_alarm_lookback_minutes" {
     error_message = "The lookback must cover at least one schedule interval, or events between runs are never searched."
   }
 }
+
+variable "organization_managed_threat_detection" {
+  description = "This account is a member of an organization whose delegated administrator (org/security-admin) manages GuardDuty and Security Hub. The lab then creates no detector or hub of its own, but keeps its alerting rules on this account's own findings."
+  type        = bool
+  default     = false
+}

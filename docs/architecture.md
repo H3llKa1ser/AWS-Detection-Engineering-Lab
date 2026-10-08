@@ -583,3 +583,12 @@ log group, plus `kms:Decrypt` via CloudWatch Logs for the encrypted group.
 | Semantics | case-sensitive; no exists, regex or CIDR | Sigma's (case-insensitive, `ispresent`, RE2, `isIpInSubnet`) | Sigma's |
 | History | from creation onwards | lookback window | full retention in S3 |
 | Provider | `hashicorp/aws` | `hashicorp/awscc` | `hashicorp/aws` |
+
+## Multi-account
+
+`org/management` and `org/security-admin` apply the delegated-administrator
+pattern for GuardDuty and Security Hub across an organization: GuardDuty
+delegated and configured in every region, Security Hub central configuration
+from the home region, findings from every account and region alerting from the
+administrator account. Member accounts running the lab set
+`organization_managed_threat_detection`. See [multi-account.md](multi-account.md).

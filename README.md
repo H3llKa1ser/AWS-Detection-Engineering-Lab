@@ -468,6 +468,28 @@ Run the schedule now, with its exact input:
 $(terraform output -raw run_scheduled_hunts_now)
 ```
 
+## Multi-account: delegated administrator
+
+For an AWS Organization, `org/` holds two small Terraform roots that run
+GuardDuty and Security Hub for every account and region from a dedicated
+security tooling account:
+
+- **`org/management`** (management account, kept minimal): GuardDuty trusted
+  access and delegated administrator in every region; Security Hub enabled and
+  delegated in the home region.
+- **`org/security-admin`** (delegated administrator): GuardDuty organization
+  configuration and protection plans in every region (auto-enable all members);
+  Security Hub **central configuration** (finding aggregator, configuration
+  policy with FSBP and CIS, associations to the root or OUs); and alerting for
+  every account's findings.
+
+Member accounts that also run the lab set `organization_managed_threat_detection
+= true`. Both delegations are protected with `prevent_destroy`, because removing
+GuardDuty's detaches every member. Tested by planning both roots offline and
+asserting on the plan; `scripts/verify_org.py` checks a real organization after
+apply. Details, AWS's requirements and their sources:
+[docs/multi-account.md](docs/multi-account.md).
+
 ## Live tests in a sandbox account
 
 Everything above is tested offline against models (DuckDB for Athena, a model of
@@ -611,6 +633,8 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
 │   ├── threat-intel/      # indicator validation + merge, versioned S3 object, Athena table
 │   ├── sigma-insights/    # Sigma rules as Logs Insights saved queries and log alarms (awscc)
+│   ├── org-delegation/    # management account: GuardDuty/Security Hub delegated administrator
+│   ├── org-security-admin/ # delegated admin: GuardDuty org config, Security Hub central configuration
 ├── sigma/                 # Sigma rules (rules/) and converter output (generated/: metric filters, hunts, REPORT.md)
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql), shared SQL (sql/)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
@@ -622,6 +646,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 ├── tests/sigma/           # Sigma converter: three-way differential tests
 ├── .github/workflows/     # CI: offline tests (tests.yml), live tiers (live.yml), janitor (live-janitor.yml)
 ├── ci/                    # bootstrap/ (sandbox OIDC role, state, budget), e2e.tfvars, render-catalogue/
+├── org/                   # multi-account roots: management/ (delegation), security-admin/ (org-wide config)
 ├── tests/live/            # live conformance and end-to-end harness, janitor, offline tests of the harness
 ├── intel/                 # curated threat indicators (CSV) and the curation rules
 ├── docs/                  # architecture, runbook, validation
@@ -641,7 +666,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] Detection-as-code for Sigma: convert Sigma rules to CloudWatch Logs metric filters and Athena hunts (9 lab rules, coverage report, three-way differential tests)
 - [x] Run the offline test suites against a live sandbox account in CI (conformance against real CloudWatch and Athena; apply, trigger, assert alarms and hunt results, destroy)
 - [x] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path (log alarms with Sigma's exact semantics, saved queries)
-- [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
+- [x] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation): every region, Security Hub central configuration, plan-tested
 - [ ] Terratest coverage in CI (GitHub Actions)
 
 ## Notes & disclaimer
