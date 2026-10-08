@@ -31,14 +31,17 @@ locals {
 
   bad_rows = [for r in local.rows : "${r._file}: ${r.indicator == "" ? "(empty)" : r.indicator}" if !(
     alltrue([for c in ["indicator", "type", "source", "confidence", "added", "expires", "description"] : r[c] != ""])
-    && contains(["ipv4", "cidr", "domain"], r.type)
+    && contains(["ipv4", "ipv6", "cidr", "domain"], r.type)
     && contains(["low", "medium", "high"], r.confidence)
     && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", r.added))
     && can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", r.expires))
     && (r.type != "ipv4" || can(regex("^([0-9]{1,3}[.]){3}[0-9]{1,3}$", r.indicator)))
-    && (r.type != "cidr" || (can(cidrhost(r.indicator, 0)) && can(regex("/", r.indicator)) && try(tonumber(split("/", r.indicator)[1]) >= 16, false)))
+    && (r.type != "ipv6" || (can(regex(":", r.indicator)) && !can(regex("/", r.indicator)) && can(cidrhost("${r.indicator}/128", 0))))
+    && (r.type != "cidr" || (can(cidrhost(r.indicator, 0)) && can(regex("/", r.indicator))
+    && try(tonumber(split("/", r.indicator)[1]) >= (can(regex(":", r.indicator)) ? 32 : 16), false)))
     && (r.type != "domain" || (can(regex("^([a-z0-9_-]+[.])+[a-z0-9-]+$", r.indicator)) && !contains(local.never_domains, r.indicator)))
     && !can(regex("^(10[.]|127[.]|169[.]254[.]|192[.]168[.]|172[.](1[6-9]|2[0-9]|3[01])[.]|0[.])", r.indicator))
+    && !can(regex("^(f[cd]|fe[89ab]|ff)[0-9a-f]{0,2}:|^::(1)?(/|$)|^::ffff:", r.indicator)) # IPv6 ULA, link-local, multicast, loopback, unspecified, v4-mapped
   )]
 
   keys      = [for r in local.rows : "${r.type}|${r.indicator}"]

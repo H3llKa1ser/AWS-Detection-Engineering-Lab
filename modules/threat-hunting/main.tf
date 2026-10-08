@@ -212,10 +212,26 @@ resource "aws_athena_workgroup" "hunting" {
 locals {
   query_files = fileset("${path.module}/queries", "*.sql")
 
-  # Shared CTE for the threat-intel hunts (active indicators as IP ranges).
-  intel_active = trimspace(templatefile("${path.module}/intel_active.sql.tftpl", {
+  # Shared SQL (modules/threat-hunting/sql/), tested in tests/hunts/test_ip_keys.py:
+  #   ip_key        canonical 32-hex key for any IPv4/IPv6 text (placeholder IP_IN)
+  #   cidr_ranges   CTE chain turning cidr_text into [lo, hi] key ranges
+  #   internal_nets private/special ranges plus internal_cidrs, as ranges
+  #   intel_active  unexpired indicators: IP ranges plus domains
+  ip_key = trimspace(file("${path.module}/sql/ip_key.sql"))
+
+  internal_nets = trimspace(templatefile("${path.module}/sql/internal_nets.sql.tftpl", {
+    extra_rows = join("", [for c in var.internal_cidrs : ", ('${lower(c)}')"])
+    ranges = trimspace(templatefile("${path.module}/sql/cidr_ranges.sql.tftpl", {
+      src = "internal_cidrs", dst = "internal_nets", ip_key = local.ip_key
+    }))
+  }))
+
+  intel_active = trimspace(templatefile("${path.module}/sql/intel_active.sql.tftpl", {
     database    = local.database
     intel_table = var.intel_table
+    ranges = trimspace(templatefile("${path.module}/sql/cidr_ranges.sql.tftpl", {
+      src = "intel_raw", dst = "intel_ranged", ip_key = local.ip_key
+    }))
   }))
 
   queries = { for f in local.query_files : trimsuffix(f, ".sql") => {
@@ -226,6 +242,8 @@ locals {
       dns_table     = var.dns_table
       intel_table   = var.intel_table
       intel_active  = local.intel_active
+      internal_nets = local.internal_nets
+      ip_key        = local.ip_key
       lookback_days = var.lookback_days
       recent_days   = var.recent_days
     })
@@ -263,6 +281,10 @@ locals {
         dns_table     = var.dns_table
         intel_table   = var.intel_table
         intel_active  = local.intel_active
+        internal_nets = local.internal_nets
+        ip_key        = local.ip_key
+        internal_nets = local.internal_nets
+        ip_key        = local.ip_key
         lookback_days = local.schedulable[k].baseline ? var.lookback_days : 2
         recent_days   = 2
       }))

@@ -312,3 +312,12 @@ that whole period.
 remove it, with the reason in the pull request. Do not keep a known-false
 indicator around to "watch" it: that is what ALERT-mode DNS Firewall lists are
 for.
+
+## IPv6 notes
+
+- Hunts show addresses as the logs wrote them; matching ignores notation, so a
+  `2001:DB8:0:0:0:0:0:1` in a result row can match the indicator `2001:db8::1`.
+- If hunts 18 or 20 report a destination you know is internal (a peered VPC, a
+  second VPC IPv6 block in another account, on-premises), add the range to
+  `extra_internal_cidrs` and apply; `terraform output internal_cidrs` shows what
+  is currently treated as internal.

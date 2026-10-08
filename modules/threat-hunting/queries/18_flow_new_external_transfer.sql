@@ -4,7 +4,9 @@
 -- requires: flow
 -- schedule-time-column: first_seen
 -- schedule-baseline: true
-WITH egress AS (
+-- External means outside internal_nets: private and special IPv4/IPv6 ranges plus the monitored VPCs' own CIDRs. VPC IPv6 addresses are globally routable, so only the VPC CIDR identifies them as internal.
+WITH ${internal_nets},
+egress AS (
   SELECT instance_id, dstaddr, dstport, bytes, from_unixtime(start) AS ts
   FROM "${database}"."${flow_table}"
   WHERE dt >= date_format(current_date - interval '${lookback_days}' day, '%Y/%m/%d')
@@ -12,11 +14,18 @@ WITH egress AS (
     AND flow_direction = 'egress'
     AND coalesce(instance_id, '-') <> '-'
     AND coalesce(pkt_dst_aws_service, '-') = '-'
-    AND NOT regexp_like(dstaddr, '^(10[.]|172[.](1[6-9]|2[0-9]|3[01])[.]|192[.]168[.]|169[.]254[.]|127[.]|100[.](6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])[.])')
+),
+internal_addrs AS (
+  SELECT DISTINCT d.dstaddr AS addr
+  FROM (SELECT DISTINCT dstaddr FROM egress) d
+  JOIN internal_nets n ON ${replace(ip_key, "IP_IN", "d.dstaddr")} BETWEEN n.lo AND n.hi
+),
+external AS (
+  SELECT * FROM egress WHERE dstaddr NOT IN (SELECT addr FROM internal_addrs)
 ),
 baseline AS (
   SELECT DISTINCT instance_id, dstaddr
-  FROM egress
+  FROM external
   WHERE ts < current_timestamp - interval '${recent_days}' day
 ),
 recent AS (
@@ -26,7 +35,7 @@ recent AS (
     array_agg(DISTINCT dstport) AS ports,
     min(ts) AS first_seen,
     max(ts) AS last_seen
-  FROM egress
+  FROM external
   WHERE ts >= current_timestamp - interval '${recent_days}' day
   GROUP BY instance_id, dstaddr
 )

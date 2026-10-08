@@ -16,6 +16,8 @@ resource "aws_vpc" "lab" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
+  assign_generated_ipv6_cidr_block = var.enable_ipv6
+
   tags = { Name = "${var.name_prefix}-lab-vpc" }
 }
 

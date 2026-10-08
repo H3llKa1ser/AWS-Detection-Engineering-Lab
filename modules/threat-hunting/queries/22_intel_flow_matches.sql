@@ -15,10 +15,9 @@ flows AS (
   FROM "${database}"."${flow_table}"
   WHERE dt >= date_format(current_date - interval '${lookback_days}' day, '%Y/%m/%d')
 ),
-flows_int AS (
-  SELECT *, (TRY_CAST(split_part(remote_ip, '.', 1) AS bigint) * 16777216 + TRY_CAST(split_part(remote_ip, '.', 2) AS bigint) * 65536 + TRY_CAST(split_part(remote_ip, '.', 3) AS bigint) * 256 + TRY_CAST(split_part(remote_ip, '.', 4) AS bigint)) AS remote_int
+flows_keyed AS (
+  SELECT *, ${replace(ip_key, "IP_IN", "remote_ip")} AS remote_key
   FROM flows
-  WHERE regexp_like(remote_ip, '^[0-9]{1,3}([.][0-9]{1,3}){3}$')
 )
 SELECT
   f.instance_id,
@@ -32,8 +31,8 @@ SELECT
   array_agg(DISTINCT f.dstport) AS dst_ports,
   min(f.ts) AS first_seen,
   max(f.ts) AS last_seen
-FROM flows_int f
-JOIN intel i ON i.kind = 'ip' AND f.remote_int BETWEEN i.lo AND i.hi
+FROM flows_keyed f
+JOIN intel i ON i.kind = 'ip' AND f.remote_key BETWEEN i.lo AND i.hi
 GROUP BY f.instance_id, f.remote_ip, f.flow_direction, i.indicator, i.source, i.confidence, i.description, i.confidence_rank
 ORDER BY i.confidence_rank DESC, accepted DESC, bytes DESC
 LIMIT 500

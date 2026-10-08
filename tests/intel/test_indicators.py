@@ -31,6 +31,9 @@ INTERNAL = [ipaddress.ip_network(n) for n in (
     "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")]
 NEVER_DOMAINS = {"amazonaws.com", "amazon.com", "aws.amazon.com", "cloudfront.net", "github.com", "googleapis.com",
                  "google.com", "microsoft.com", "windows.net", "azure.com", "akamaiedge.net", "cloudflare.com"}
+INTERNAL6 = [ipaddress.ip_network(n) for n in (
+    "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "100::/64",
+    "fc00::/7", "fe80::/10", "ff00::/8")]   # 2001:db8::/32 (documentation) is allowed for canaries
 DOMAIN_RE = re.compile(r"^([a-z0-9_-]+\.)+[a-z0-9-]+$")
 MAX_LIFETIME_DAYS = 400
 LONG_LIVED_SOURCES = {"lab-canary"}   # canaries must outlive the lab
@@ -67,8 +70,8 @@ def validate(files, today=None):
             for c in REQUIRED:
                 if not r[c]:
                     errors.append(f"{where}: empty {c}")
-            if r["type"] not in ("ipv4", "cidr", "domain"):
-                errors.append(f"{where}: type must be ipv4, cidr or domain")
+            if r["type"] not in ("ipv4", "ipv6", "cidr", "domain"):
+                errors.append(f"{where}: type must be ipv4, ipv6, cidr or domain")
             if r["confidence"] not in ("low", "medium", "high"):
                 errors.append(f"{where}: confidence must be low, medium or high")
             try:
@@ -89,15 +92,27 @@ def validate(files, today=None):
                         errors.append(f"{where}: internal or reserved address")
                 except ValueError:
                     errors.append(f"{where}: not an IPv4 address")
-            elif r["type"] == "cidr":
+            elif r["type"] == "ipv6":
                 try:
-                    net = ipaddress.IPv4Network(ind, strict=True)
-                    if net.prefixlen < 16:
-                        errors.append(f"{where}: wider than /16")
-                    if any(net.overlaps(i) for i in INTERNAL):
+                    ip = ipaddress.IPv6Address(ind)
+                    if any(ip in net for net in INTERNAL6):
+                        errors.append(f"{where}: internal, special or IPv4-embedding IPv6 address (use an ipv4 row for IPv4)")
+                    elif ind != ip.compressed:
+                        errors.append(f"{where}: not canonical; write it as {ip.compressed} (RFC 5952)")
+                except ValueError:
+                    errors.append(f"{where}: not an IPv6 address")
+            elif r["type"] == "cidr":
+                v6 = ":" in ind
+                try:
+                    net = (ipaddress.IPv6Network if v6 else ipaddress.IPv4Network)(ind, strict=True)
+                    if net.prefixlen < (32 if v6 else 16):
+                        errors.append(f"{where}: wider than /{32 if v6 else 16}")
+                    if any(net.overlaps(i) for i in (INTERNAL6 if v6 else INTERNAL)):
                         errors.append(f"{where}: overlaps an internal or reserved range")
+                    elif ind != str(net):
+                        errors.append(f"{where}: not canonical; write it as {net}")
                 except ValueError as e:
-                    errors.append(f"{where}: not an aligned IPv4 CIDR ({e})")
+                    errors.append(f"{where}: not an aligned {'IPv6' if v6 else 'IPv4'} CIDR ({e})")
             elif r["type"] == "domain":
                 if not DOMAIN_RE.match(ind):
                     errors.append(f"{where}: not a bare domain (no scheme, path, port, wildcard or trailing dot)")
@@ -153,7 +168,25 @@ def test_validator_catches_each_rule():
         "x.example,domain,s,high,2026-10-01,2026-09-01,d,": "expires before added",
         "x.example,domain,s,high,2026-01-01,2028-01-01,d,": "lifetime over",
         "x.example,domain,s,high,2026-10-01,2026-11-01,,": "empty description",
+        "fd00::1,ipv6,s,high,2026-10-01,2026-11-01,d,": "internal, special",
+        "fe80::1,ipv6,s,high,2026-10-01,2026-11-01,d,": "internal, special",
+        "ff02::1,ipv6,s,high,2026-10-01,2026-11-01,d,": "internal, special",
+        "::1,ipv6,s,high,2026-10-01,2026-11-01,d,": "internal, special",
+        "::ffff:192.0.2.1,ipv6,s,high,2026-10-01,2026-11-01,d,": "IPv4-embedding",
+        "2001:db8:0::1,ipv6,s,high,2026-10-01,2026-11-01,d,": "not canonical; write it as 2001:db8::1",
+        "2001:db8::/16,cidr,s,high,2026-10-01,2026-11-01,d,": "not an aligned IPv6",
+        "2001::/16,cidr,s,high,2026-10-01,2026-11-01,d,": "wider than /32",
+        "2001:db8::1/32,cidr,s,high,2026-10-01,2026-11-01,d,": "not an aligned IPv6",
+        "fc00::/8,cidr,s,high,2026-10-01,2026-11-01,d,": "overlaps an internal",
+        "2001:db8:0:0::/48,cidr,s,high,2026-10-01,2026-11-01,d,": "not canonical; write it as 2001:db8::/48",
+        "2001:db8::1,ipv4,s,high,2026-10-01,2026-11-01,d,": "not an IPv4 address",
+        "192.0.2.1,ipv6,s,high,2026-10-01,2026-11-01,d,": "not an IPv6 address",
     }
+    # And valid IPv6 rows pass cleanly.
+    # Case is normalised (as Terraform does), so upper case is fine; compression form is not.
+    ok, _ = validate(_files(HEADER + "2001:DB8::1,ipv6,s,high,2026-10-01,2026-11-01,d,\n"
+                                     "2001:db8:abcd::/48,cidr,s,high,2026-10-01,2026-11-01,d,\n"), today=dt.date(2026, 10, 8))
+    assert ok == [], ok
     for row, expected in cases.items():
         errors, _ = validate(_files(HEADER + row + "\n"), today=dt.date(2026, 10, 8))
         assert any(expected in e for e in errors), (row, expected, errors)
@@ -203,6 +236,8 @@ FEED = """################################################################
 # DstIP
 203.0.113.7
 198.51.100.23
+2001:DB8:0::bad
+fe80::1
 
 10.0.0.5
 not-an-ip
@@ -214,8 +249,9 @@ not-an-ip
 def test_importer_parses_feed_safely():
     imp = _importer()
     ips, skipped = imp.parse_feed(FEED)
-    assert ips == ["198.51.100.23", "203.0.113.7"], ips                       # deduplicated, sorted numerically
-    assert dict(skipped) == {"10.0.0.5": "internal or reserved address", "not-an-ip": "not an IPv4 address"}, skipped
+    assert ips == ["198.51.100.23", "203.0.113.7", "2001:db8::bad"], ips      # deduplicated, sorted, IPv6 canonical
+    assert dict(skipped) == {"10.0.0.5": "internal or reserved address", "fe80::1": "internal or reserved address",
+                             "not-an-ip": "not an IP address"}, skipped
     assert imp.parse_feed("# header only\n# END 0 entries\n") == ([], [])      # empty feed is not an error
 
 
@@ -227,7 +263,8 @@ def test_importer_output_passes_curation_rules():
     errors, _ = validate(read_dir(d))
     assert not errors, errors
     rows = list(csv.DictReader(out.open()))
-    assert len(rows) == 2 and all(r["source"] == "feodotracker" and r["type"] == "ipv4" for r in rows), rows
+    assert [(r["indicator"], r["type"]) for r in rows] == [("198.51.100.23", "ipv4"), ("203.0.113.7", "ipv4"),
+                                                           ("2001:db8::bad", "ipv6")], rows
     assert (dt.date.fromisoformat(rows[0]["expires"]) - dt.date.fromisoformat(rows[0]["added"])).days == 14
 
 

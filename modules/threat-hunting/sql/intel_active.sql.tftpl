@@ -1,0 +1,28 @@
+-- Active (unexpired) indicators, normalised. IPv4, IPv6 and CIDR rows become
+-- [lo, hi] ranges of canonical 32-hex address keys (IPv4 as ::ffff:a.b.c.d),
+-- so one BETWEEN matches either family and any textual form of an address.
+-- Rendered by Terraform into hunts 22-24 through the intel_active template variable.
+intel_raw AS (
+  SELECT
+    lower(trim(indicator)) AS indicator,
+    lower(trim(type)) AS type,
+    trim(source) AS source,
+    lower(trim(confidence)) AS confidence,
+    trim(description) AS description,
+    trim(reference) AS reference,
+    CASE lower(trim(confidence)) WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END AS confidence_rank,
+    lower(trim(indicator)) AS cidr_text
+  FROM "${database}"."${intel_table}"
+  WHERE trim(expires) >= date_format(current_date, '%Y-%m-%d')
+),
+${ranges},
+intel AS (
+  SELECT indicator, type, source, confidence, description, reference, 'ip' AS kind, confidence_rank, lo, hi
+  FROM intel_ranged
+  WHERE type IN ('ipv4', 'ipv6', 'cidr')
+  UNION ALL
+  SELECT indicator, type, source, confidence, description, reference, 'domain' AS kind, confidence_rank,
+         CAST(NULL AS varchar) AS lo, CAST(NULL AS varchar) AS hi
+  FROM intel_raw
+  WHERE type = 'domain'
+)

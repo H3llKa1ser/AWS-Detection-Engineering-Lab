@@ -214,6 +214,19 @@ python3 tests/hunts/test_hunts.py         # includes intel hunts and the canary 
    `hunt findings: retro/24_intel_cloudtrail_source_ip`. Remove the row
    afterwards.
 
+## IPv6
+
+Offline: `python3 tests/hunts/test_ip_keys.py` (SQL vs Python `ipaddress`).
+
+In the account: `terraform output internal_cidrs` should list the lab VPC's
+IPv4 CIDR and its Amazon-provided IPv6 /56. To check IPv6 indicator matching
+end to end without real traffic, add a short-lived `ipv6` indicator for the
+public IPv6 address of a dual-stack machine you control, call any AWS API from
+it over IPv6 (enable the CLI's dual-stack endpoints with
+`AWS_USE_DUALSTACK_ENDPOINT=true`, for a service that offers one in your
+region), and expect
+`retro/24_intel_cloudtrail_source_ip` after apply. Remove the row afterwards.
+
 ## Scheduled hunts
 
 ### Offline (no AWS)

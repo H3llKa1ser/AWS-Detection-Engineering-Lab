@@ -5,7 +5,9 @@
 -- schedule-time-column: first_seen
 -- schedule-baseline: false
 -- Joins flow logs to Resolver query logs from the same VPCs. An instance using its own resolver instead of the Route 53 Resolver will appear here too, which is worth knowing.
-WITH egress AS (
+-- Addresses are compared as canonical keys, so an AAAA answer written as 2001:db8::1 matches a flow to 2001:0db8:0:0:0:0:0:1.
+WITH ${internal_nets},
+egress AS (
   SELECT instance_id, dstaddr, dstport, bytes, from_unixtime(start) AS ts
   FROM "${database}"."${flow_table}"
   WHERE dt >= date_format(current_date - interval '${lookback_days}' day, '%Y/%m/%d')
@@ -13,16 +15,29 @@ WITH egress AS (
     AND flow_direction = 'egress'
     AND coalesce(instance_id, '-') <> '-'
     AND coalesce(pkt_dst_aws_service, '-') = '-'
-    AND NOT regexp_like(dstaddr, '^(10[.]|172[.](1[6-9]|2[0-9]|3[01])[.]|192[.]168[.]|169[.]254[.]|127[.]|100[.](6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])[.])')
 ),
-resolved AS (
+internal_addrs AS (
+  SELECT DISTINCT d.dstaddr AS addr
+  FROM (SELECT DISTINCT dstaddr FROM egress) d
+  JOIN internal_nets n ON ${replace(ip_key, "IP_IN", "d.dstaddr")} BETWEEN n.lo AND n.hi
+),
+external AS (
+  SELECT e.*, ${replace(ip_key, "IP_IN", "e.dstaddr")} AS dst_key
+  FROM egress e
+  WHERE dstaddr NOT IN (SELECT addr FROM internal_addrs)
+),
+answers AS (
   SELECT
     srcids.instance AS instance,
     from_iso8601_timestamp(query_timestamp) AS ts,
-    transform(answers, a -> a.rdata) AS ips
+    t.ip
   FROM "${database}"."${dns_table}"
+  CROSS JOIN UNNEST(transform(answers, a -> a.rdata)) AS t (ip)
   WHERE dt >= date_format(current_date - interval '${lookback_days}' day - interval '1' day, '%Y/%m/%d')
-    AND cardinality(answers) > 0
+),
+resolved AS (
+  SELECT instance, ts, ${replace(ip_key, "IP_IN", "ip")} AS ip_key
+  FROM answers
 )
 SELECT
   e.instance_id,
@@ -32,10 +47,10 @@ SELECT
   count(*) AS flows,
   min(e.ts) AS first_seen,
   max(e.ts) AS last_seen
-FROM egress e
+FROM external e
 LEFT JOIN resolved r
   ON r.instance = e.instance_id
- AND contains(r.ips, e.dstaddr)
+ AND r.ip_key = e.dst_key
  AND r.ts BETWEEN e.ts - interval '1' day AND e.ts
 WHERE r.instance IS NULL
 GROUP BY e.instance_id, e.dstaddr

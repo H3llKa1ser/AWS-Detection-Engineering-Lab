@@ -115,21 +115,48 @@ SCHEMAS = {TABLE: module_schema, FLOW: lambda: lake_schema("flow_columns"), DNS:
 # --- Rendering: same substitutions Terraform's templatefile() makes ----------
 
 def _fill(template, values):
+    """Render the subset of Terraform template syntax the SQL uses: ${name} and
+    ${replace(name, "A", "B")}."""
+    def call(m):
+        name, a, b = m.group(1), m.group(2), m.group(3)
+        return str(values[name]).replace(a, b)
+    template = re.sub(r'\$\{replace\((\w+), "([^"]*)", "([^"]*)"\)\}', call, template)
     for k, v in values.items():
         template = template.replace("${" + k + "}", str(v))
     assert "${" not in template, "unrendered template variable"
     return template
 
 
+INTERNAL_CIDRS = ["10.42.0.0/16", "2600:1f18:abcd:ef00::/56"]   # the test VPC's IPv4 and IPv6 CIDRs
+
+
+def ip_key():
+    return (MODULE / "sql" / "ip_key.sql").read_text().strip()
+
+
+def _ranges(src, dst):
+    return _fill((MODULE / "sql" / "cidr_ranges.sql.tftpl").read_text(), {"src": src, "dst": dst, "ip_key": ip_key()}).strip()
+
+
+def internal_nets(cidrs=None):
+    """Mirror of local.internal_nets in modules/threat-hunting/main.tf."""
+    cidrs = INTERNAL_CIDRS if cidrs is None else cidrs
+    return _fill((MODULE / "sql" / "internal_nets.sql.tftpl").read_text(), {
+        "extra_rows": "".join(f", ('{c.lower()}')" for c in cidrs),
+        "ranges": _ranges("internal_cidrs", "internal_nets")}).strip()
+
+
 def intel_active():
     """Mirror of local.intel_active in modules/threat-hunting/main.tf."""
-    return _fill((MODULE / "intel_active.sql.tftpl").read_text(), {"database": DB, "intel_table": INTEL}).strip()
+    return _fill((MODULE / "sql" / "intel_active.sql.tftpl").read_text(), {
+        "database": DB, "intel_table": INTEL, "ranges": _ranges("intel_raw", "intel_ranged")}).strip()
 
 
 def render_athena(name, lookback_days=30, recent_days=1):
     return _fill((MODULE / "queries" / f"{name}.sql").read_text(),
                  {"database": DB, "table": TABLE, "flow_table": FLOW, "dns_table": DNS,
                   "intel_table": INTEL, "intel_active": intel_active(),
+                  "internal_nets": internal_nets(), "ip_key": ip_key(),
                   "lookback_days": lookback_days, "recent_days": recent_days})
 
 
@@ -508,8 +535,14 @@ def test_18_flow_new_external_transfer():
         flow(RECENT, "10.42.1.20", "10.42.2.5", 5432, instance="i-0db", nbytes=2000 * MiB),     # internal
         flow(RECENT, "10.42.1.20", "52.95.1.1", 443, instance="i-0db", nbytes=900 * MiB, aws_service="S3"),
         flow(RECENT, "10.42.1.20", "100.64.0.9", 443, instance="i-0db", nbytes=900 * MiB),      # CGNAT range: private
+        # IPv6: the VPC's own (globally routable) range is internal; so are ULA and link-local
+        flow(RECENT, "2600:1f18:abcd:ef00::30", "2001:db8:bad::10", 443, instance="i-0v6", nbytes=300 * MiB),
+        flow(RECENT, "2600:1f18:abcd:ef00::30", "2600:1f18:abcd:ef00:0:0:0:20", 443, instance="i-0v6", nbytes=900 * MiB),
+        flow(RECENT, "2600:1f18:abcd:ef00::30", "fd12:3456::1", 443, instance="i-0v6", nbytes=900 * MiB),
+        flow(RECENT, "2600:1f18:abcd:ef00::30", "fe80::1", 443, instance="i-0v6", nbytes=900 * MiB),
     ])
-    assert [(r["instance_id"], r["dstaddr"], r["mib_out"]) for r in rows] == [("i-0db", "198.51.100.200", 180.0)], rows
+    assert [(r["instance_id"], r["dstaddr"], r["mib_out"]) for r in rows] == [
+        ("i-0v6", "2001:db8:bad::10", 300.0), ("i-0db", "198.51.100.200", 180.0)], rows
 
 
 def test_19_flow_internal_scan():
@@ -518,8 +551,13 @@ def test_19_flow_internal_scan():
     events += [flow(HOUR + timedelta(seconds=i), "10.42.1.9", "10.42.1.50", 1000 + i, instance="i-0pwned") for i in range(5)]
     events += [flow(HOUR + timedelta(minutes=i), "10.42.1.10", f"10.42.1.{i + 60}", 443, instance="i-0web") for i in range(3)]
     events += [flow(HOUR + timedelta(seconds=i), "10.42.1.11", f"198.51.100.{i}", 443, instance="i-0crawler") for i in range(40)]
+    # IPv6 sweep inside the dual-stack VPC; and an IPv6 host talking to many *external* addresses
+    events += [flow(HOUR + timedelta(seconds=i), "2600:1f18:abcd:ef00::9", f"2600:1f18:abcd:ef00::{i + 100:x}", 445,
+                    instance="i-0v6pwned", action="REJECT") for i in range(25)]
+    events += [flow(HOUR + timedelta(seconds=i), "2600:1f18:abcd:ef00::a", f"2001:db8::{i + 1:x}", 443,
+                    instance="i-0v6web") for i in range(40)]
     rows = run("19_flow_internal_scan", events)
-    assert [(r["srcaddr"], r["hosts"]) for r in rows] == [("10.42.1.9", 31)], rows
+    assert [(r["srcaddr"], r["hosts"]) for r in rows] == [("10.42.1.9", 31), ("2600:1f18:abcd:ef00::9", 25)], rows
     assert rows[0]["rejected"] == 20, rows
 
 
@@ -533,9 +571,15 @@ def test_20_flow_egress_without_dns():
         flow(RECENT, "10.42.1.11", "203.0.113.77", 443, instance="i-0b"),              # resolved too long ago
         dns(RECENT - timedelta(minutes=5), "i-0c", "x.example.com", answers=["203.0.113.88"]),
         flow(RECENT, "10.42.1.12", "203.0.113.88", 443, instance="i-0d"),              # resolved by ANOTHER instance
+        # IPv6: AAAA answer and flow written differently are still the same address
+        dns(RECENT - timedelta(minutes=10), "i-0e", "v6.example.com", "AAAA", answers=["2001:db8:c0ff:ee::5"]),
+        flow(RECENT, "2600:1f18:abcd:ef00::5", "2001:0DB8:C0FF:00EE:0000:0000:0000:0005", 443, instance="i-0e"),
+        flow(RECENT, "2600:1f18:abcd:ef00::5", "2001:db8:bad::66", 443, instance="i-0e"),             # never resolved
+        flow(RECENT, "2600:1f18:abcd:ef00::5", "2600:1f18:abcd:ef00::99", 443, instance="i-0e"),      # VPC internal
     ])
     got = sorted((r["instance_id"], r["dstaddr"]) for r in rows)
-    assert got == [("i-0a", "198.51.100.66"), ("i-0b", "203.0.113.77"), ("i-0d", "203.0.113.88")], got
+    assert got == [("i-0a", "198.51.100.66"), ("i-0b", "203.0.113.77"), ("i-0d", "203.0.113.88"),
+                   ("i-0e", "2001:db8:bad::66")], got
 
 
 def test_21_investigate_instance():
@@ -568,11 +612,18 @@ def test_22_intel_flow_matches():
         flow(RECENT, "10.42.1.11", "198.51.100.16", 443, instance="i-0b"),         # first address outside
         flow(RECENT, "10.42.1.13", "192.0.2.10", 443, instance="i-0d"),            # expired indicator
         flow(RECENT, "10.42.1.13", "203.0.113.51", 443, instance="i-0d"),          # neighbour, no match
+        ind("2001:db8:bad::10", "ipv6"), ind("2001:db8:f00d::/48", "cidr", confidence="medium"),
+        flow(RECENT, "2600:1f18:abcd:ef00::5", "2001:DB8:BAD:0:0:0:0:10", 443, instance="i-0e"),     # other textual form
+        flow(RECENT, "2001:db8:f00d:ffff:ffff:ffff:ffff:ffff", "2600:1f18:abcd:ef00::6", 22, instance="i-0f",
+             direction="ingress"),                                                                  # last address of /48
+        flow(RECENT, "2600:1f18:abcd:ef00::6", "2001:db8:f00e::", 443, instance="i-0f"),           # first address outside
     ])
     got = {(r["instance_id"], r["remote_ip"], r["direction"], r["indicator"]) for r in rows}
     assert got == {("i-0a", "203.0.113.50", "egress", "203.0.113.50"),
                    ("i-0b", "198.51.100.15", "egress", "198.51.100.0/28"),
-                   ("i-0c", "198.51.100.0", "ingress", "198.51.100.0/28")}, got
+                   ("i-0c", "198.51.100.0", "ingress", "198.51.100.0/28"),
+                   ("i-0e", "2001:DB8:BAD:0:0:0:0:10", "egress", "2001:db8:bad::10"),
+                   ("i-0f", "2001:db8:f00d:ffff:ffff:ffff:ffff:ffff", "ingress", "2001:db8:f00d::/48")}, got
     assert rows[0]["confidence"] == "high", rows                                # high confidence first
     assert {r["remote_ip"]: r["rejected"] for r in rows}["198.51.100.0"] == 1, rows
 
@@ -586,10 +637,13 @@ def test_23_intel_dns_matches():
         dns(RECENT, "i-0b", "cdn.innocent.com", answers=["203.0.113.50", "203.0.113.9"]),  # answer match
         dns(RECENT, "i-0b", "other.innocent.com", answers=["203.0.113.99"]),
         dns(RECENT, "i-0c", "old-bad.org"),                                         # expired
+        ind("2001:db8:f00d::/48", "cidr"),
+        dns(RECENT, "i-0d", "v6.innocent.com", "AAAA", answers=["2001:db8:f00d::7"]),    # AAAA answer match
+        dns(RECENT, "i-0d", "v6.other.com", "AAAA", answers=["2001:db8:f00e::7"]),       # outside the /48
     ])
     got = {(r["query_name"], r["matched_on"]) for r in rows}
     assert got == {("evil-c2.net", "domain"), ("a.b.evil-c2.net", "domain"),
-                   ("cdn.innocent.com", "answer 203.0.113.50")}, got
+                   ("cdn.innocent.com", "answer 203.0.113.50"), ("v6.innocent.com", "answer 2001:db8:f00d::7")}, got
     assert {r["query_name"]: r["dns_firewall"] for r in rows}["evil-c2.net"] == ["BLOCK"], rows
 
 
@@ -601,9 +655,12 @@ def test_24_intel_cloudtrail_source_ip():
         ev("ListBuckets", "s3.amazonaws.com", RECENT, user("bob"), "192.0.2.66", err="AccessDenied"),
         ev("ListBuckets", "s3.amazonaws.com", RECENT, user("carol"), "198.51.100.17"),   # outside range
         ev("Decrypt", "kms.amazonaws.com", RECENT, role_session("app", "s"), "s3.amazonaws.com"),  # service caller
+        ind("2001:db8:bad::10", "ipv6"),
+        ev("GetCallerIdentity", "sts.amazonaws.com", RECENT, user("dave"), "2001:db8:bad:0::10"),   # IPv6 caller
     ])
     got = {(r["sourceipaddress"], r["indicator"], r["succeeded"]) for r in rows}
-    assert got == {("198.51.100.1", "198.51.100.5/28", 1), ("192.0.2.66", "192.0.2.66", 0)}, got
+    assert got == {("198.51.100.1", "198.51.100.5/28", 1), ("192.0.2.66", "192.0.2.66", 0),
+                   ("2001:db8:bad:0::10", "2001:db8:bad::10", 1)}, got
     assert rows[0]["confidence"] == "high", rows
 
 

@@ -1,0 +1,32 @@
+${dst}_a AS (
+  SELECT *,
+    ${replace(ip_key, "IP_IN", "split_part(cidr_text, '/', 1)")} AS cr_addr_key,
+    CASE WHEN strpos(cidr_text, ':') > 0
+         THEN coalesce(TRY_CAST(nullif(split_part(cidr_text, '/', 2), '') AS integer), 128)
+         ELSE 96 + coalesce(TRY_CAST(nullif(split_part(cidr_text, '/', 2), '') AS integer), 32)
+    END AS cr_prefix
+  FROM ${src}
+),
+${dst}_b AS (
+  SELECT *,
+    CAST(floor(cr_prefix / 4.0) AS integer) AS cr_full,
+    cr_prefix - 4 * CAST(floor(cr_prefix / 4.0) AS integer) AS cr_rem
+  FROM ${dst}_a
+),
+${dst}_c AS (
+  SELECT *,
+    strpos('0123456789abcdef', substr(cr_addr_key, cr_full + 1, 1)) - 1 AS cr_nib,
+    CAST(power(2, 4 - cr_rem) AS integer) AS cr_step
+  FROM ${dst}_b
+),
+${dst} AS (
+  SELECT *,
+    substr(cr_addr_key, 1, cr_full)
+      || CASE WHEN cr_rem = 0 THEN '' ELSE substr('0123456789abcdef', cr_nib - (cr_nib % cr_step) + 1, 1) END
+      || substr('00000000000000000000000000000000', 1, 32 - cr_full - CASE WHEN cr_rem = 0 THEN 0 ELSE 1 END) AS lo,
+    substr(cr_addr_key, 1, cr_full)
+      || CASE WHEN cr_rem = 0 THEN '' ELSE substr('0123456789abcdef', cr_nib - (cr_nib % cr_step) + cr_step, 1) END
+      || substr('ffffffffffffffffffffffffffffffff', 1, 32 - cr_full - CASE WHEN cr_rem = 0 THEN 0 ELSE 1 END) AS hi
+  FROM ${dst}_c
+  WHERE cr_addr_key IS NOT NULL AND cr_prefix BETWEEN 0 AND 128
+)

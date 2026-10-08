@@ -2,3 +2,5 @@ indicator,type,source,confidence,added,expires,description,reference
 intel-canary.invalid,domain,lab-canary,high,2026-10-08,2030-12-31,"Canary: the traffic generator resolves beacon.intel-canary.invalid every cycle, so hunt 23 must find it. Proves the intel pipeline end to end.",docs/validation.md
 192.0.2.66,ipv4,lab-canary,high,2026-10-08,2030-12-31,"Canary IP in TEST-NET-1 (never routed). Use it to test IP matching by hand, e.g. a CloudTrail call from this address in a test fixture.",docs/validation.md
 198.51.100.0/28,cidr,lab-canary,medium,2026-10-08,2030-12-31,"Canary range in TEST-NET-2, to test CIDR matching. Documentation-only addresses: real traffic never matches.",docs/validation.md
+2001:db8::66,ipv6,lab-canary,high,2026-10-08,2030-12-31,"Canary IPv6 address in the documentation range 2001:db8::/32 (never routed), to test IPv6 matching by hand.",docs/validation.md
+2001:db8:abcd::/48,cidr,lab-canary,medium,2026-10-08,2030-12-31,"Canary IPv6 range in the documentation range, to test IPv6 CIDR matching across a /48.",docs/validation.md

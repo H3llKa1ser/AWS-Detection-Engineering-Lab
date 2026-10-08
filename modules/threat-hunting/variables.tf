@@ -85,3 +85,9 @@ variable "intel_bucket_arn" {
   type        = string
   default     = null
 }
+
+variable "internal_cidrs" {
+  description = "Address ranges that count as internal in network hunts, on top of the built-in private and special ranges: the monitored VPCs' IPv4 and IPv6 CIDRs (VPC IPv6 addresses are globally routable, so only the VPC's own CIDR identifies them) plus any extra ranges."
+  type        = list(string)
+  default     = []
+}

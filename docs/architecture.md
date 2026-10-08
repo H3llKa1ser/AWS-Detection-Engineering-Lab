@@ -410,11 +410,12 @@ same bytes as Terraform.
 
 ### Matching
 
-`modules/threat-hunting/intel_active.sql.tftpl` is a shared CTE, injected into
-hunts 22-24 at render time. It drops expired rows and turns every IPv4 or CIDR
-indicator into an integer range `[lo, hi]` (aligning a misaligned CIDR base), so
-flow endpoints, DNS answer IPs and CloudTrail source IPs are matched with one
-`BETWEEN`. Domain indicators match exact names and subdomains on a dot boundary
+`modules/threat-hunting/sql/intel_active.sql.tftpl` is a shared CTE, injected
+into hunts 22-24 at render time. It drops expired rows and turns every IPv4,
+IPv6 or CIDR indicator into a `[lo, hi]` range of canonical address keys
+(aligning a misaligned CIDR base), so flow endpoints, DNS answer IPs (A and
+AAAA) and CloudTrail source IPs are matched with one `BETWEEN` (see "IPv4 and
+IPv6" below). Domain indicators match exact names and subdomains on a dot boundary
 (implemented with `reverse()`/`strpos`, which behaves the same in Athena and in
 the test engine). These are range and suffix joins against a small table:
 fine for a curated list of hundreds or thousands; a feed of millions would
@@ -436,3 +437,54 @@ the retro variant and ignored by the daily one.
 deployed (CloudTrail always; network hunts with the lake; intel hunts with
 intel). Every combination of optional layers was checked to recommend only
 hunts whose tables exist.
+
+## IPv4 and IPv6
+
+### Why addresses need a canonical key
+
+IPv6 has many spellings for one address (`2001:db8::1`,
+`2001:0DB8:0000:0000:0000:0000:0000:0001`, ...), and different AWS log sources
+are not guaranteed to agree. String comparison silently fails across them.
+Before this change hunt 20 compared DNS answers to flow destinations as
+strings, and hunts 18-20 decided "internal" with an IPv4 private-range regex,
+so every IPv6 address counted as external (false positives in 18 and 20) and
+IPv6 sweeps were invisible to 19.
+
+### Shared SQL (`modules/threat-hunting/sql/`)
+
+- **`ip_key.sql`**: an expression with the placeholder `IP_IN`, instantiated in
+  templates with Terraform's `replace()`. It returns 32 lowercase hex digits:
+  IPv4 as `::ffff:a.b.c.d`; IPv6 fully expanded (it rebuilds the zero run that
+  `::` stands for, then left-pads each group). Fixed width means plain string
+  comparison orders keys numerically. Malformed text returns NULL, guarded
+  explicitly because `lpad` would otherwise truncate an over-long group into a
+  plausible key.
+- **`cidr_ranges.sql.tftpl`**: a CTE chain from a `cidr_text` column to `lo`
+  and `hi` keys. IPv4 prefixes are offset by 96 into the mapped range; a prefix
+  that is not a multiple of 4 masks the boundary hex digit arithmetically.
+- **`internal_nets.sql.tftpl`**: private and special ranges of both families
+  plus `internal_cidrs`, as ranges.
+
+Only functions with identical behaviour in Athena (Trino) and DuckDB are used,
+checked by transpiling each one; the one known difference (`split_part` beyond
+the last field: NULL in Trino, `''` in DuckDB) is neutralised by `TRY_CAST`, with
+an explicit `nullif` as a guard.
+
+### Internal ranges
+
+`internal_cidrs` is computed in the root module: every IPv4 and IPv6 CIDR block
+of each monitored VPC (`cidr_block_associations`,
+`ipv6_cidr_block_associations`) plus `extra_internal_cidrs`. Hunts 18 and 20
+exclude destinations inside these ranges; hunt 19 requires both ends inside.
+Addresses are classified once per distinct address (a range join against a
+small table), then filtered with an ordinary `IN`.
+
+### Verification
+
+`tests/hunts/test_ip_keys.py` compares the SQL with Python's `ipaddress` on
+random and edge-case input (keys, malformed input, network bounds at every
+prefix length, membership). Mutating the SQL (padding, the `::` rules, the IPv4
+offset, the partial-nibble mask) fails it. Hunt tests cover IPv6 textual
+variants, VPC-internal and ULA addresses, the last address of a /48 and the
+first outside it, AAAA answers, and IPv6 sweeps; removing the VPC IPv6 CIDR
+from the inputs fails hunts 18-20, which shows that discovery is load-bearing.

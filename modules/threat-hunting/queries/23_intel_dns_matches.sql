@@ -1,6 +1,6 @@
 -- title: DNS lookups of threat-intel domains, or answers pointing at threat-intel IPs
 -- attack: TA0011 Command and Control / T1071.004 Application Layer Protocol: DNS
--- purpose: Queries for an active domain indicator or any of its subdomains, and queries whose answers resolve to an active IP or CIDR indicator, with whether DNS Firewall already acted.
+-- purpose: Queries for an active domain indicator or any of its subdomains, and queries whose A or AAAA answers resolve to an active IP or CIDR indicator, with whether DNS Firewall already acted.
 -- requires: dns,intel
 -- schedule-time-column: last_seen
 -- schedule-baseline: false
@@ -25,16 +25,15 @@ by_name AS (
    AND (q.name = i.indicator OR strpos(reverse(q.name), reverse('.' || i.indicator)) = 1)
 ),
 answer_ips AS (
-  SELECT q.instance, q.name, q.firewall_rule_action, q.ts, ip
+  SELECT q.instance, q.name, q.firewall_rule_action, q.ts, ip, ${replace(ip_key, "IP_IN", "ip")} AS ip_key
   FROM q
   CROSS JOIN UNNEST(q.ips) AS t (ip)
-  WHERE regexp_like(ip, '^[0-9]{1,3}([.][0-9]{1,3}){3}$')
 ),
 by_answer AS (
   SELECT a.instance, a.name, 'answer ' || a.ip AS matched_on, i.indicator, i.source, i.confidence, i.confidence_rank,
          i.description, a.firewall_rule_action, a.ts
   FROM answer_ips a
-  JOIN intel i ON i.kind = 'ip' AND (TRY_CAST(split_part(a.ip, '.', 1) AS bigint) * 16777216 + TRY_CAST(split_part(a.ip, '.', 2) AS bigint) * 65536 + TRY_CAST(split_part(a.ip, '.', 3) AS bigint) * 256 + TRY_CAST(split_part(a.ip, '.', 4) AS bigint)) BETWEEN i.lo AND i.hi
+  JOIN intel i ON i.kind = 'ip' AND a.ip_key BETWEEN i.lo AND i.hi
 ),
 matches AS (
   SELECT * FROM by_name

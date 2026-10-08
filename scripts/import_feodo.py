@@ -25,32 +25,34 @@ OUT = pathlib.Path(__file__).resolve().parents[1] / "intel" / "indicators" / "fe
 COLUMNS = ["indicator", "type", "source", "confidence", "added", "expires", "description", "reference"]
 INTERNAL = [ipaddress.ip_network(n) for n in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
-    "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")]
+    "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+    "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "100::/64", "fc00::/7", "fe80::/10", "ff00::/8")]
 
 
 def parse_feed(text):
     """Return (ips, skipped). Comments and blanks are ignored; anything that is
-    not a public IPv4 address is skipped with a reason, never imported."""
+    not a public IPv4 or IPv6 address is skipped with a reason, never imported.
+    IPv6 addresses come out in canonical (RFC 5952) form."""
     ips, skipped = [], []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         try:
-            ip = ipaddress.IPv4Address(line)
+            ip = ipaddress.ip_address(line)
         except ValueError:
-            skipped.append((line, "not an IPv4 address"))
+            skipped.append((line, "not an IP address"))
             continue
-        if any(ip in n for n in INTERNAL):
+        if any(ip.version == n.version and ip in n for n in INTERNAL):
             skipped.append((line, "internal or reserved address"))
             continue
         ips.append(str(ip))
-    return sorted(set(ips), key=lambda a: ipaddress.IPv4Address(a)), skipped
+    return sorted(set(ips), key=lambda a: (ipaddress.ip_address(a).version, ipaddress.ip_address(a))), skipped
 
 
 def build_rows(ips, today, days):
     expires = (today + dt.timedelta(days=days)).isoformat()
-    return [{"indicator": ip, "type": "ipv4", "source": "feodotracker", "confidence": "medium",
+    return [{"indicator": ip, "type": "ipv6" if ":" in ip else "ipv4", "source": "feodotracker", "confidence": "medium",
              "added": today.isoformat(), "expires": expires,
              "description": "Botnet C2 server listed by abuse.ch Feodo Tracker (recommended blocklist)",
              "reference": URL} for ip in ips]
