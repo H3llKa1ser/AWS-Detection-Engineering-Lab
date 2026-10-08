@@ -1,0 +1,65 @@
+{
+  "sigma_console_login_outside_known_ranges": {
+    "alarm_query": "fields @timestamp, @message\n| filter (((ispresent(eventName) and eventName like /(?is)^ConsoleLogin$/) and (ispresent(responseElements.ConsoleLogin) and responseElements.ConsoleLogin like /(?is)^Success$/)) and (not ((ispresent(sourceIPAddress) and isIpInSubnet(sourceIPAddress, \"192.0.2.0/24\")) or (ispresent(sourceIPAddress) and isIpInSubnet(sourceIPAddress, \"2001:db8::/32\")))))",
+    "attack": "T1078.004",
+    "level": "medium",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter (((ispresent(eventName) and eventName like /(?is)^ConsoleLogin$/) and (ispresent(responseElements.ConsoleLogin) and responseElements.ConsoleLogin like /(?is)^Success$/)) and (not ((ispresent(sourceIPAddress) and isIpInSubnet(sourceIPAddress, \"192.0.2.0/24\")) or (ispresent(sourceIPAddress) and isIpInSubnet(sourceIPAddress, \"2001:db8::/32\")))))\n| sort @timestamp desc\n| limit 500",
+    "title": "Console Sign-In From Outside Known Ranges"
+  },
+  "sigma_ec2_user_data_modified": {
+    "alarm_query": "fields @timestamp, @message\n| filter ((ispresent(eventSource) and eventSource like /(?is)^ec2\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^ModifyInstanceAttribute$/) and (ispresent(requestParameters.userData) and requestParameters.userData like /(?is)^.*$/))",
+    "attack": "T1037",
+    "level": "medium",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter ((ispresent(eventSource) and eventSource like /(?is)^ec2\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^ModifyInstanceAttribute$/) and (ispresent(requestParameters.userData) and requestParameters.userData like /(?is)^.*$/))\n| sort @timestamp desc\n| limit 500",
+    "title": "EC2 Instance User Data Modified"
+  },
+  "sigma_guardduty_detector_disabled": {
+    "alarm_query": "fields @timestamp, @message\n| filter (((ispresent(eventSource) and eventSource like /(?is)^guardduty\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^DeleteDetector$/)) or ((ispresent(eventSource) and eventSource like /(?is)^guardduty\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^UpdateDetector$/) and (ispresent(requestParameters.enable) and (requestParameters.enable = 0 or requestParameters.enable = \"false\"))))",
+    "attack": "T1562.001",
+    "level": "high",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter (((ispresent(eventSource) and eventSource like /(?is)^guardduty\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^DeleteDetector$/)) or ((ispresent(eventSource) and eventSource like /(?is)^guardduty\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^UpdateDetector$/) and (ispresent(requestParameters.enable) and (requestParameters.enable = 0 or requestParameters.enable = \"false\"))))\n| sort @timestamp desc\n| limit 500",
+    "title": "GuardDuty Detector Deleted or Disabled"
+  },
+  "sigma_iam_root_access_key_created": {
+    "alarm_query": "fields @timestamp, @message\n| filter ((ispresent(eventSource) and eventSource like /(?is)^iam\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^CreateAccessKey$/) and (ispresent(userIdentity.type) and userIdentity.type like /(?is)^Root$/))",
+    "attack": "T1098.001",
+    "level": "critical",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter ((ispresent(eventSource) and eventSource like /(?is)^iam\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^CreateAccessKey$/) and (ispresent(userIdentity.type) and userIdentity.type like /(?is)^Root$/))\n| sort @timestamp desc\n| limit 500",
+    "title": "Access Key Created for the Root User"
+  },
+  "sigma_lambda_function_url_public": {
+    "alarm_query": "fields @timestamp, @message\n| filter ((ispresent(eventSource) and eventSource like /(?is)^lambda\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^CreateFunctionUrlConfig.*$/) or (ispresent(eventName) and eventName like /(?is)^UpdateFunctionUrlConfig.*$/)) and (ispresent(requestParameters.authType) and requestParameters.authType like /(?is)^NONE$/))",
+    "attack": "T1190",
+    "level": "medium",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter ((ispresent(eventSource) and eventSource like /(?is)^lambda\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^CreateFunctionUrlConfig.*$/) or (ispresent(eventName) and eventName like /(?is)^UpdateFunctionUrlConfig.*$/)) and (ispresent(requestParameters.authType) and requestParameters.authType like /(?is)^NONE$/))\n| sort @timestamp desc\n| limit 500",
+    "title": "Lambda Function URL Created Without Authentication"
+  },
+  "sigma_organizations_leave": {
+    "alarm_query": "fields @timestamp, @message\n| filter ((ispresent(eventSource) and eventSource like /(?is)^organizations\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^LeaveOrganization$/))",
+    "attack": "T1666",
+    "level": "critical",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter ((ispresent(eventSource) and eventSource like /(?is)^organizations\\.amazonaws\\.com$/) and (ispresent(eventName) and eventName like /(?is)^LeaveOrganization$/))\n| sort @timestamp desc\n| limit 500",
+    "title": "Account Left Its AWS Organization"
+  },
+  "sigma_s3_public_access_block_removed": {
+    "alarm_query": "fields @timestamp, @message\n| filter (((ispresent(eventSource) and eventSource like /(?is)^s3\\.amazonaws\\.com$/) or (ispresent(eventSource) and eventSource like /(?is)^s3\\-control\\.amazonaws\\.com$/)) and (ispresent(eventName) and eventName like /(?is)^Delete.*$/) and (ispresent(eventName) and eventName like /(?is)^.*PublicAccessBlock$/))",
+    "attack": "T1537 / T1562",
+    "level": "high",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter (((ispresent(eventSource) and eventSource like /(?is)^s3\\.amazonaws\\.com$/) or (ispresent(eventSource) and eventSource like /(?is)^s3\\-control\\.amazonaws\\.com$/)) and (ispresent(eventName) and eventName like /(?is)^Delete.*$/) and (ispresent(eventName) and eventName like /(?is)^.*PublicAccessBlock$/))\n| sort @timestamp desc\n| limit 500",
+    "title": "S3 Public Access Block Removed"
+  },
+  "sigma_secretsmanager_resource_policy_changed": {
+    "alarm_query": "fields @timestamp, @message\n| filter (((ispresent(eventSource) and eventSource like /(?is)^secretsmanager\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^PutResourcePolicy$/) or (ispresent(eventName) and eventName like /(?is)^DeleteResourcePolicy$/))) and (not (ispresent(errorCode) and errorCode like /(?is)^.*$/)))",
+    "attack": "T1098 / T1555.006",
+    "level": "medium",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter (((ispresent(eventSource) and eventSource like /(?is)^secretsmanager\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^PutResourcePolicy$/) or (ispresent(eventName) and eventName like /(?is)^DeleteResourcePolicy$/))) and (not (ispresent(errorCode) and errorCode like /(?is)^.*$/)))\n| sort @timestamp desc\n| limit 500",
+    "title": "Secrets Manager Resource Policy Changed"
+  },
+  "sigma_ssm_command_by_human": {
+    "alarm_query": "fields @timestamp, @message\n| filter (((ispresent(eventSource) and eventSource like /(?is)^ssm\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^SendCommand$/) or (ispresent(eventName) and eventName like /(?is)^StartSession$/))) and (not (ispresent(userIdentity.invokedBy) and userIdentity.invokedBy like /(?is)^.*\\.amazonaws\\.com$/)))",
+    "attack": "T1651",
+    "level": "medium",
+    "saved_query": "fields @timestamp, eventSource, eventName, errorCode, awsRegion, sourceIPAddress, userAgent, userIdentity.arn, userIdentity.principalId\n| filter (((ispresent(eventSource) and eventSource like /(?is)^ssm\\.amazonaws\\.com$/) and ((ispresent(eventName) and eventName like /(?is)^SendCommand$/) or (ispresent(eventName) and eventName like /(?is)^StartSession$/))) and (not (ispresent(userIdentity.invokedBy) and userIdentity.invokedBy like /(?is)^.*\\.amazonaws\\.com$/)))\n| sort @timestamp desc\n| limit 500",
+    "title": "SSM Command or Session Started by a Person"
+  }
+}

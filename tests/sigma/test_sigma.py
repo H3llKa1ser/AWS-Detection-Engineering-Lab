@@ -250,6 +250,129 @@ def cwl_eval(node, event):
     return hit if op == "=" else not hit
 
 
+# --- Model of CloudWatch Logs Insights (documented semantics + two PROBE assumptions) -------
+# Documented: and/or/not; comparisons and functions return booleans; ispresent();
+# isIpInSubnet() for IPv4 and IPv6 (true only for a valid address in the subnet);
+# `like /regex/` matches anywhere unless anchored; (?i) works; RE2 syntax.
+# PROBE (not documented; checked by the live conformance tier): a JSON null field
+# counts as not present, and a JSON boolean compares equal to the number 1 / 0.
+
+LI_TOKEN = re.compile(r'\s*(\(|\)|,|=|/(?:\\.|[^/\\])*/|"(?:[^"\\]|\\.)*"|-?\d+(?![A-Za-z_.])|[A-Za-z_@][A-Za-z0-9_.@]*)')
+
+
+def li_parse(cond):
+    toks, pos = [], 0
+    while pos < len(cond):
+        m = LI_TOKEN.match(cond, pos)
+        if not m:
+            if not cond[pos:].strip():
+                break
+            raise ValueError(f"cannot tokenize at {cond[pos:pos + 25]!r}")
+        toks.append(m.group(1))
+        pos = m.end()
+    i = 0
+
+    def take(expected=None):
+        nonlocal i
+        t = toks[i]
+        if expected is not None and t != expected:
+            raise ValueError(f"expected {expected}, got {t}")
+        i += 1
+        return t
+
+    def atom():
+        t = take()
+        if t == "ispresent":
+            take("(")
+            f = take()
+            take(")")
+            return ("present", f)
+        if t == "isIpInSubnet":
+            take("(")
+            f = take()
+            take(",")
+            net = json.loads(take())
+            take(")")
+            return ("subnet", f, net)
+        op = take()
+        val = take()
+        if op == "like":
+            return ("like", t, val[1:-1].replace("\\/", "/"))
+        if op == "=":
+            return ("eq", t, json.loads(val) if val.startswith('"') else int(val))
+        raise ValueError(f"unsupported {t} {op}")
+
+    def factor():
+        if toks[i] == "not":
+            take()
+            return ("not", factor())
+        if toks[i] == "(":
+            take("(")
+            x = expr()
+            take(")")
+            return x
+        return atom()
+
+    def term():
+        parts = [factor()]
+        while i < len(toks) and toks[i] == "and":
+            take()
+            parts.append(factor())
+        return ("and", parts)
+
+    def expr():
+        parts = [term()]
+        while i < len(toks) and toks[i] == "or":
+            take()
+            parts.append(term())
+        return ("or", parts)
+
+    tree = expr()
+    if i != len(toks):
+        raise ValueError(f"trailing tokens: {toks[i:]}")
+    return tree
+
+
+def li_value(event, field):
+    v = get_path(event, field)
+    return MISSING if v is None else v          # PROBE: JSON null counts as absent
+
+
+def li_eval(node, event):
+    k = node[0]
+    if k == "and":
+        return all(li_eval(x, event) for x in node[1])
+    if k == "or":
+        return any(li_eval(x, event) for x in node[1])
+    if k == "not":
+        return not li_eval(node[1], event)
+    v = li_value(event, node[1])
+    if k == "present":
+        return v is not MISSING
+    if v is MISSING or isinstance(v, (dict, list)):
+        return False                             # documented: maps/lists compare false
+    if k == "subnet":
+        try:
+            ip = ipaddress.ip_address(str(v))
+        except ValueError:
+            return False
+        net = ipaddress.ip_network(node[2])
+        return ip.version == net.version and ip in net
+    if k == "like":
+        text = scalar_text(v)
+        return re.search(node[2], text) is not None
+    want = node[2]
+    if isinstance(want, int):
+        if isinstance(v, bool):
+            return int(v) == want                # PROBE: JSON true/false compare as 1/0
+        return isinstance(v, (int, float)) and v == want
+    return isinstance(v, str) and v == want
+
+
+def li_filter(conv):
+    return li_parse(conv["insights"]["filter"])
+
+
 # --- Athena (generated SQL in DuckDB) ----------------------------------------------------
 
 def to_row(event):
@@ -311,6 +434,11 @@ def evaluate(conv, events):
     ref = [ref_eval(conv["ir"], ev) for ev in events]
     ath = athena_matches(conv["hunt_sql"], events) if "hunt_sql" in conv else None
     cw = [cwl_eval(cwl_parse(conv["cloudwatch"]), ev) for ev in events] if "cloudwatch" in conv else None
+    if "insights" in conv:
+        tree = li_filter(conv)
+        li = [li_eval(tree, ev) for ev in events]
+        assert li == ref, ("logs insights disagrees with reference", conv["slug"],
+                           [(events[i], ref[i], li[i]) for i in range(len(ref)) if li[i] != ref[i]][:2])
     return ref, ath, cw
 
 
@@ -354,7 +482,8 @@ LAB_EXPECTATIONS = {
         ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": False}, True),
         ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector", "requestParameters.enable": True}, False),
         ({"eventSource": "guardduty.amazonaws.com", "eventName": "UpdateDetector"}, False),
-        ({"eventSource": "guardduty.amazonaws.com", "eventName": "CreateDetector"}, False)],
+        ({"eventSource": "guardduty.amazonaws.com", "eventName": "CreateDetector"}, False),
+        ({"eventSource": "guarddutyXamazonaws.com", "eventName": "DeleteDetector"}, False)],    # . is literal
     "sigma_s3_public_access_block_removed": [
         ({"eventSource": "s3.amazonaws.com", "eventName": "DeleteBucketPublicAccessBlock"}, True),
         ({"eventSource": "s3-control.amazonaws.com", "eventName": "DeleteAccountPublicAccessBlock"}, True),
@@ -505,7 +634,7 @@ def candidates_for(field_leaves, rnd):
         if kind == "pattern":
             s = sample_tokens(value, rnd)
             cands += [(s, False), (s + "Q", False), (s[1:] if len(s) > 1 else s + "x", False)]
-            confused = s.replace("_", "A").replace("%", "A")      # matches only if _ or % act as SQL wildcards
+            confused = s.replace("_", "A").replace("%", "A").replace(".", "X")   # _ % . must not act as wildcards
             if confused != s:
                 cands.append((confused, False))
             if not cased and s.swapcase() != s:
@@ -571,6 +700,14 @@ def test_differential_fixture_rules():
         conv = fixture(name)
         assert "error" not in conv, (name, conv.get("error"))
         differential(conv)
+
+
+def test_logs_insights_converts_every_fixture_rule():
+    """Logs Insights can express every supported construct, unlike metric filters."""
+    for name in FIXTURE_RULES:
+        conv = fixture(name)
+        assert "insights" in conv, (name, conv.get("insights_skipped"))
+        assert len(conv["insights"]["saved_query"]) <= sc.INSIGHTS_MAX_QUERY
 
 
 def test_targets_reported_for_fixtures():
@@ -664,6 +801,13 @@ def test_unsupported_constructs_are_reported_with_reasons():
         "template_syntax": ("detection: {sel: {userAgent: 'a${b}'}, condition: sel}", None, "template syntax"),
         "not_null": ("detection: {sel: {errorCode: null}, condition: not sel}", "cannot test that a field exists", None),
     }
+    # Logs Insights: arrays are refused; RE2 has no lookaround or backreferences.
+    conv = convert_text("title: arr\nlogsource: {product: aws, service: cloudtrail}\n"
+                        "detection: {sel: {resources.ARN: 'arn:*'}, condition: sel}\n", "arr.yml")
+    assert "inside an array" in conv.get("insights_skipped", ""), conv
+    conv = convert_text("title: look\nlogsource: {product: aws, service: cloudtrail}\n"
+                        "detection: {sel: {eventName|re: '^Delete(?!Trail)'}, condition: sel}\n", "look.yml")
+    assert "RE2" in conv.get("insights_skipped", "") and "athena" in conv, conv
     for name, (det, cw_reason, ath_reason) in target_cases.items():
         conv = convert_text(f"title: {name}\nlogsource: {{product: aws, service: cloudtrail}}\n{det}\n", f"{name}.yml")
         assert "error" not in conv, (name, conv.get("error"))

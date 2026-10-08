@@ -7,8 +7,8 @@ Sandbox janitor: finds what crashed or cancelled e2e runs left behind.
                  that finished cleanly deletes its state); the workflow then
                  runs `terraform destroy` for each and deletes the state.
   sweep          delete test activity that lives outside Terraform state:
-                 e2e alert queues and e2e target IAM users older than the
-                 threshold.
+                 e2e alert queues, e2e target IAM users and conformance log
+                 groups older than the threshold.
 
     python3 tests/live/janitor.py stale-states --bucket <state bucket>
     python3 tests/live/janitor.py sweep
@@ -54,6 +54,13 @@ def sweep(session, cutoff, dry_run=False):
             removed.append(f"queue {name}")
             if not dry_run:
                 sqs.delete_queue(QueueUrl=url)
+    logs = session.client("logs")
+    for page in logs.get_paginator("describe_log_groups").paginate(logGroupNamePrefix="/detlab-ci/conformance/"):
+        for g in page["logGroups"]:
+            if datetime.fromtimestamp(g["creationTime"] / 1000, timezone.utc) < cutoff:
+                removed.append(f"log group {g['logGroupName']}")
+                if not dry_run:
+                    logs.delete_log_group(logGroupName=g["logGroupName"])
     iam = session.client("iam")
     for page in iam.get_paginator("list_users").paginate():
         for user in page["Users"]:

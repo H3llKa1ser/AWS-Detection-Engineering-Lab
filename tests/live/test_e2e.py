@@ -37,7 +37,8 @@ CFG = Config(retries={"mode": "standard", "max_attempts": 10})
 ALARM_TIMEOUT = 35 * 60
 DELIVERY_TIMEOUT = 45 * 60
 EXPECTED_ALARMS = ["security_group_changes", "sigma_ssm_command_by_human", "dns_firewall_block",
-                   "dns_onion_lookup", "dns_mining_pool_lookup", "dns_txt_query_spike"]
+                   "dns_onion_lookup", "dns_mining_pool_lookup", "dns_txt_query_spike",
+                   "insights-sigma_ssm_command_by_human"]     # same trigger, second path (Logs Insights)
 
 
 class Alerts(threading.Thread):

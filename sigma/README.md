@@ -1,10 +1,14 @@
 # Sigma rules
 
 Detections written once in [Sigma](https://sigmahq.io/) and converted by
-`scripts/sigma_convert.py` into this lab's two targets:
+`scripts/sigma_convert.py` into this lab's three targets:
 
 - **CloudWatch Logs metric filters** over the CloudTrail log group, added to the
   detection catalogue with alarms to the alert topic (real time, minutes);
+- **CloudWatch Logs Insights log alarms** over the same log group: CloudWatch
+  runs the rule's Logs Insights query every 5 minutes and alarms on a match
+  (`<prefix>-insights-sigma_<rule>`), plus a saved query per rule. This is the
+  second real-time path, and the one with Sigma's exact semantics;
 - **Athena hunts** over the CloudTrail table, saved in the hunting workgroup and
   schedulable like any other hunt (`sigma_<rule file name>`).
 
@@ -25,22 +29,22 @@ meaning. Anything else is skipped for that target, with the reason, in
 
 ## Supported subset
 
-| Sigma | CloudWatch metric filter | Athena hunt |
-|-------|--------------------------|-------------|
-| `and`, `or`, `not`, parentheses, `1 of` / `all of` (wildcards, `them`) | yes (negation pushed down to fields) | yes |
-| strings, lists, `\|all` | yes | yes |
-| `*` wildcard | start or end of a value only | anywhere |
-| `?` wildcard, escaped literal `\*` | no | yes |
-| `contains`, `startswith`, `endswith` | yes | yes |
-| case-insensitive matching (Sigma default) | **no**: CloudWatch is case-sensitive | yes |
-| `\|cased` | yes | yes |
-| integers, booleans, `null` | yes (`not null` no: CloudWatch has no `EXISTS`) | yes |
-| `\|exists: false` / `true` | false only | yes |
-| `\|re` (`\|i`) | no | yes |
-| `\|cidr` (IPv4 and IPv6) | no | yes |
-| `resources.*` (array fields) | no | no |
-| keywords, aggregations (`\| count()`), correlations, other modifiers | not converted | not converted |
-| patterns over 1024 characters | no (CloudWatch limit) | yes |
+| Sigma | CloudWatch metric filter | Logs Insights log alarm | Athena hunt |
+|-------|--------------------------|-------------------------|-------------|
+| `and`, `or`, `not`, parentheses, `1 of` / `all of` (wildcards, `them`) | yes (negation pushed down to fields) | yes | yes |
+| strings, lists, `\|all` | yes | yes | yes |
+| `*` wildcard | start or end of a value only | anywhere (regex) | anywhere |
+| `?` wildcard, escaped literal `\*` | no | yes | yes |
+| `contains`, `startswith`, `endswith` | yes | yes | yes |
+| case-insensitive matching (Sigma default) | **no**: CloudWatch is case-sensitive | yes (`(?i)` regex) | yes |
+| `\|cased` | yes | yes | yes |
+| integers, booleans, `null` | yes (`not null` no: CloudWatch has no `EXISTS`) | yes (booleans matched as 1/0 or "true"/"false"; JSON null as absent: checked live) | yes |
+| `\|exists: false` / `true` | false only | yes | yes |
+| `\|re` (`\|i`) | no | yes (RE2: no lookaround or backreferences) | yes |
+| `\|cidr` (IPv4 and IPv6) | no | yes (`isIpInSubnet`, both families) | yes |
+| `resources.*` (array fields) | no | no | no |
+| keywords, aggregations (`\| count()`), correlations, other modifiers | not converted | not converted | not converted |
+| patterns over 1024 characters | no (CloudWatch limit) | queries up to 10,000 characters | yes |
 
 **Semantics.** Both targets follow the Sigma rule that a condition on an absent
 field is false, so `not` of it is true. In Athena every comparison is guarded so

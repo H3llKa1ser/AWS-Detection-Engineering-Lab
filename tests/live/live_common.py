@@ -8,6 +8,7 @@ import gzip
 import io
 import json
 import pathlib
+import re
 import sys
 import time
 import traceback
@@ -220,9 +221,51 @@ def parse_sns_envelope(body):
     return env.get("Subject") or "", msg
 
 
+ALARM_SUBJECT = re.compile(r'^ALARM: "(.+?)" in ')
+
+
 def alarm_names_in_alarm(messages):
-    return {m["AlarmName"] for _, m in messages if isinstance(m, dict) and m.get("NewStateValue") == "ALARM"}
+    """Alarm names that reached ALARM, from the JSON body (metric alarms) or the
+    standard subject line, so log alarms count whichever format they use."""
+    names = set()
+    for subject, m in messages:
+        if isinstance(m, dict) and m.get("NewStateValue") == "ALARM" and m.get("AlarmName"):
+            names.add(m["AlarmName"])
+        hit = ALARM_SUBJECT.match(subject or "")
+        if hit:
+            names.add(hit.group(1))
+    return names
 
 
 def failed_hunts(messages):
     return sorted(s for s, _ in messages if "hunt FAILED:" in s)
+
+
+# --- CloudWatch Logs Insights -------------------------------------------------------------------
+
+PUT_LOG_EVENTS_BATCH = 1000            # well under the API's 10,000-event / 1 MB per-call limits
+
+
+def put_events(logs, group, stream, messages, start_ms):
+    """Write messages as log events with strictly increasing timestamps."""
+    events = [{"timestamp": start_ms + i, "message": m} for i, m in enumerate(messages)]
+    for batch in chunks(events, PUT_LOG_EVENTS_BATCH):
+        logs.put_log_events(logGroupName=group, logStreamName=stream, logEvents=batch)
+
+
+def insights_query(logs, group, query, start_s, end_s, timeout=300):
+    """Run a Logs Insights query; return rows as dicts."""
+    qid = logs.start_query(logGroupNames=[group], startTime=int(start_s), endTime=int(end_s),
+                           queryString=query, limit=10000)["queryId"]
+
+    def done():
+        r = logs.get_query_results(queryId=qid)
+        return r if r["status"] not in ("Scheduled", "Running") else None
+    r = wait_until(done, timeout, 2, f"Logs Insights query {qid}")
+    if r["status"] != "Complete":
+        raise RuntimeError(f"Logs Insights query {r['status']}: {query[:200]}")
+    return [{f["field"]: f["value"] for f in row} for row in r["results"]]
+
+
+def insights_rule_query(condition):
+    return f"fields eventID\n| filter {condition}\n| limit 10000"

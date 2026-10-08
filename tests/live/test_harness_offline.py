@@ -240,6 +240,117 @@ def test_trigger_and_orchestration_calls_are_valid():
             assert "Unknown parameter" in str(e), e
 
 
+class FakeLogs:
+    """In-memory CloudWatch Logs + Logs Insights for the conformance check. Every call's
+    parameters are validated against the real API model. `bool_mode` and
+    `null_present` let it misbehave like a service whose undocumented behaviour
+    differs from the model's PROBE assumptions."""
+
+    def __init__(self, bool_mode="number", null_present=False):
+        import botocore.session
+        self.model = botocore.session.get_session().get_service_model("logs")
+        self.bool_mode, self.null_present = bool_mode, null_present
+        self.groups, self.queries, self.calls = {}, {}, []
+
+    def _validate(self, op, params):
+        from botocore.validate import validate_parameters
+        validate_parameters(params, self.model.operation_model(op).input_shape)
+        self.calls.append(op)
+
+    def create_log_group(self, **kw):
+        self._validate("CreateLogGroup", kw)
+        self.groups[kw["logGroupName"]] = []
+
+    def put_retention_policy(self, **kw):
+        self._validate("PutRetentionPolicy", kw)
+
+    def create_log_stream(self, **kw):
+        self._validate("CreateLogStream", kw)
+
+    def put_log_events(self, **kw):
+        self._validate("PutLogEvents", kw)
+        self.groups[kw["logGroupName"]] += [json.loads(e["message"]) for e in kw["logEvents"]]
+
+    def delete_log_group(self, **kw):
+        self._validate("DeleteLogGroup", kw)
+        del self.groups[kw["logGroupName"]]
+
+    def _eval(self, node, ev):
+        k = node[0]
+        if k in ("and", "or"):
+            return (all if k == "and" else any)(self._eval(x, ev) for x in node[1])
+        if k == "not":
+            return not self._eval(node[1], ev)
+        v = ts.get_path(ev, node[1])
+        present = v is not ts.MISSING and (v is not None or self.null_present)
+        if k == "present":
+            return present
+        if not present or v is None:
+            return False
+        if k == "eq" and isinstance(v, bool):
+            want = node[2]
+            if self.bool_mode == "number":
+                return isinstance(want, int) and int(v) == want
+            if self.bool_mode == "string":
+                return isinstance(want, str) and want == ("true" if v else "false")
+            return False
+        return ts.li_eval(node, ev)
+
+    def start_query(self, **kw):
+        self._validate("StartQuery", kw)
+        group, q = self.groups[kw["logGroupNames"][0]], kw["queryString"]
+        if q.startswith("stats count(*)"):
+            rows = [[{"field": "n", "value": str(len(group))}]]
+        else:
+            cond = q.split("| filter ", 1)[1].rsplit("\n| limit", 1)[0]
+            tree = ts.li_parse(cond)
+            rows = [[{"field": "eventID", "value": e["eventID"]}] for e in group if self._eval(tree, e)]
+        qid = f"q{len(self.queries)}"
+        self.queries[qid] = rows
+        return {"queryId": qid}
+
+    def get_query_results(self, **kw):
+        self._validate("GetQueryResults", kw)
+        return {"status": "Complete", "results": self.queries[kw["queryId"]]}
+
+
+def test_insights_conformance_check_passes_and_fails_correctly():
+    import test_conformance as tc
+    ok = FakeLogs()                                     # behaves as the model assumes
+    detail = tc.check_insights(ok)
+    assert "service == model" in detail and "number 1: True" in detail, detail
+    assert not ok.groups, "the throwaway log group must be deleted"
+    assert {"CreateLogGroup", "PutLogEvents", "StartQuery", "GetQueryResults", "DeleteLogGroup"} <= set(ok.calls)
+
+    detail = tc.check_insights(FakeLogs(bool_mode="string"))   # the dual-form boolean emission covers this
+    assert 'string "true": True' in detail, detail
+
+    for fake, needle in ((FakeLogs(bool_mode="neither"), "PROBE boolean"), (FakeLogs(null_present=True), "PROBE null")):
+        try:
+            tc.check_insights(fake)
+            raise AssertionError(f"conformance must fail when the service differs ({needle})")
+        except AssertionError as e:
+            assert needle in str(e), str(e)[:300]
+        assert not fake.groups, "the log group is deleted even when the check fails"
+
+
+def test_insights_helpers_batch_and_parse():
+    logs = FakeLogs()
+    logs.create_log_group(logGroupName="/g")
+    lc.put_events(logs, "/g", "s", [json.dumps({"eventID": str(i)}) for i in range(2500)], 1_760_000_000_000)
+    assert logs.calls.count("PutLogEvents") == 3 and len(logs.groups["/g"]) == 2500
+    for conv in ts.lab_rules().values():
+        q = lc.insights_rule_query(conv["insights"]["filter"])
+        ts.li_parse(q.split("| filter ", 1)[1].rsplit("\n| limit", 1)[0])
+        assert len(conv["insights"]["saved_query"]) <= 10000
+
+
+def test_alarm_names_from_body_or_subject():
+    msgs = [("ALARM: \"e2e-1-1-insights-sigma_x\" in EU (Ireland)", "free text, not JSON"),
+            ("OK: \"e2e-1-1-y\" in EU (Ireland)", "x")]
+    assert lc.alarm_names_in_alarm(msgs) == {"e2e-1-1-insights-sigma_x"}
+
+
 # --- Helpers ---------------------------------------------------------------------------------------------
 
 def test_cloudtrail_object_is_a_valid_log_file():
