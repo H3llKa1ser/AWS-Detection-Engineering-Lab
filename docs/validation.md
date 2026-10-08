@@ -130,7 +130,7 @@ filters → Create → Test pattern**.
 
 ```bash
 pip install -r tests/hunts/requirements.txt
-python3 tests/hunts/test_hunts.py     # expect 15/15 passed
+python3 tests/hunts/test_hunts.py     # expect: all passed
 ```
 
 ### In the account
@@ -156,14 +156,47 @@ To see a hunt fire for real, run one of the Level 2 actions (for example
 access key for a test user from another user and check hunt 05 the next time
 CloudTrail delivers (typically within 5-15 minutes).
 
+## Network log lake
+
+Flow logs reach S3 every few minutes after there is traffic (the lab VPC has
+little; the traffic generator or a monitored VPC helps). DNS records arrive
+when Firehose flushes, every 5 minutes by default. Then, in the hunting
+workgroup:
+
+```sql
+SELECT 'flow' AS source, dt, count(*) AS records FROM detlab_security.vpc_flow_logs
+WHERE dt >= date_format(current_date - interval '1' day, '%Y/%m/%d') GROUP BY 1, 2
+UNION ALL
+SELECT 'dns', dt, count(*) FROM detlab_security.resolver_query_logs
+WHERE dt >= date_format(current_date - interval '1' day, '%Y/%m/%d') GROUP BY 1, 2
+```
+
+If DNS shows nothing, check in this order:
+
+1. `aws s3 ls s3://<network-bucket>/route53resolver-errors/ --recursive`. Files
+   here mean Firehose received records but could not convert them; the
+   CloudWatch log group `/<prefix>/firehose/dns-to-parquet` says why.
+2. The Firehose stream's `IncomingRecords` metric. Zero means Resolver is not
+   delivering: confirm the stream still has the tag `LogDeliveryEnabled=true`
+   and the `<prefix>-dns-query-logs-firehose` config is associated with the VPC.
+
+If flow shows nothing, check that the VPC has an S3 flow log
+(`aws ec2 describe-flow-logs --filter Name=log-destination-type,Values=s3`) with
+no `DeliverLogsErrorMessage`.
+
+With the traffic generator running, hunts 15-17 have data to chew on; whether
+its synthetic patterns cross their thresholds depends on timing (hunt 15 needs
+12+ evenly spaced lookups of one name, which the generator's 15-minute cycle
+produces after about 3 hours).
+
 ## Scheduled hunts
 
 ### Offline (no AWS)
 
 ```bash
 pip install -r tests/hunts/requirements.txt -r tests/scheduled/requirements.txt
-python3 tests/hunts/test_hunts.py              # 20/20: hunts + scheduled variants
-python3 tests/scheduled/test_state_machine.py  # 5/5: state machine data flow
+python3 tests/hunts/test_hunts.py              # all passed: hunts + scheduled variants
+python3 tests/scheduled/test_state_machine.py  # all passed: state machine data flow
 
 # Schema-validate the state machine definition, rendered as the tests render it (Node.js):
 python3 -c "import json,sys; sys.path.insert(0,'tests/scheduled'); import test_state_machine as t; print(json.dumps(t.render()))" > /tmp/hunts.asl.json

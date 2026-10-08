@@ -324,3 +324,64 @@ consecutive runs every event is reported exactly once. Both suites were
 mutation-checked, and the Terraform-rendered scheduled SQL was compared
 byte-for-byte with the tests' rendering. Schema validation of the definition:
 `npx asl-validator` (see docs/validation.md).
+
+## Network log lake
+
+### Why a second copy
+
+The CloudWatch copies of flow and DNS logs exist for minute-level detection and
+are kept 30 days. Hunting wants months of history, cheap scans and joins with
+CloudTrail, which is what Parquet in S3 plus Athena gives: columnar files mean a
+hunt reading five columns pays for five columns.
+
+### Delivery paths
+
+- **Flow logs:** a second flow log per VPC, destination S3, `file_format =
+  parquet`, non-Hive paths
+  (`AWSLogs/<account>/vpcflowlogs/<region>/yyyy/MM/dd/`) so the table uses the
+  same `dt` projection as CloudTrail. Delivery is vended-log delivery by
+  `delivery.logs.amazonaws.com`, allowed by the bucket policy (scoped with
+  `aws:SourceAccount` and `aws:SourceArn`) and by a key-policy statement on the
+  lab CMK. AWS checks those permissions when the flow log is created, so the lake
+  module's `bucket_arn` output depends on the bucket policy.
+- **Resolver query logs:** Resolver can deliver to CloudWatch, S3 (JSON) or
+  Firehose, one destination per type per VPC, so a second config targets
+  Firehose. Firehose deserializes with the OpenX JSON SerDe (case-insensitive, so
+  `answers[].Rdata` maps to `rdata`), serializes Parquet with Snappy, and takes
+  its schema from the Athena table. Buffering is 64 MiB (the minimum with
+  conversion) or 300 s. Prefix
+  `route53resolver/AWSLogs/<account>/<region>/!{timestamp:yyyy/MM/dd}/` (UTC
+  arrival time), errors under `route53resolver-errors/`.
+- **Firehose permissions:** Resolver writes into Firehose through the
+  `AWSServiceRoleForLogDelivery` service-linked role, which only works on streams
+  tagged `LogDeliveryEnabled=true`. AWS adds that tag when delivery is set up;
+  the lab declares it in Terraform so a later apply does not remove it. The
+  Firehose role can write only the DNS prefixes, read only the DNS table's schema,
+  and use the key only via S3.
+
+### Tables
+
+`vpc_flow_logs` and `resolver_query_logs` live in the hunting database with
+`dt` projection from `hunting_projection_start`. The flow table's column types
+are AWS's documented Parquet types (`protocol` is `bigint`, ports and
+`tcp_flags` are `int`); a mismatch fails at read time, not at create time.
+
+### Source-aware hunts
+
+Each hunt declares `-- requires:` (default `cloudtrail`). The threat-hunting
+module saves, and allows scheduling of, only hunts whose sources are deployed,
+so disabling the lake removes hunts 15-21 cleanly instead of leaving queries
+that fail. Hunt 20 joins flow and DNS with a `LEFT JOIN ... IS NULL` anti-join
+(equality on instance plus a 24-hour time bound) rather than a correlated
+`EXISTS`, which Trino handles less reliably with range predicates.
+
+### Testing
+
+`tests/hunts/` builds all three tables from schemas parsed out of the modules
+(CloudTrail from `threat-hunting/main.tf`, flow and DNS from
+`network-log-lake/main.tf`), so a column added to a table without updating the
+hunts, or the reverse, fails the suite. Each network hunt has a planted attack
+and look-alikes; a mutation round removed each exclusion and join condition in
+turn and every removal failed its test. The round also found an exclusion in
+hunt 15 (`*.amazon.com`) that no fixture exercised and nothing justified; it
+was removed.

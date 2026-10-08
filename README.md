@@ -24,7 +24,8 @@ architecture and infrastructure-as-code in one repo.
 | **Network telemetry** | VPC Flow Logs (custom v5 format) + Route 53 Resolver query logs → CloudWatch Logs, isolated lab VPC | Network and DNS visibility you own and can write detections against |
 | **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists, custom block/allow lists, and DNS Firewall Advanced (DGA, dictionary DGA, tunnelling) | Prevention: known-bad domains *and* never-seen-before DGA/tunnelling traffic get no answer; every verdict is logged |
 | **Detection-as-code** | 26 metric-filter alarms over CloudTrail, flow and DNS logs, plus 3 EventBridge-driven alarms for DNS Firewall Advanced | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
-| **Threat hunting** | Glue table over the CloudTrail bucket (partition projection), Athena workgroup, 14 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-event joins |
+| **Network log lake** | VPC Flow Logs (native Parquet) and Resolver query logs (Firehose → Parquet) in S3, with Athena tables | Months of network and DNS history, cheap to keep and to scan, joinable with CloudTrail |
+| **Threat hunting** | Glue tables over CloudTrail, flow and DNS logs (partition projection), Athena workgroup, 21 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-source joins |
 | **Scheduled hunts** | EventBridge Scheduler → Step Functions → Athena → SNS, plus a dead man's switch | 10 hunts run daily over the last 24h; alerts only on findings or failures, each finding once |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
@@ -50,6 +51,9 @@ flowchart LR
         DNS[Route 53 Resolver<br/>query logs]
         FW -->|verdict: BLOCK / ALERT| DNS
     end
+    FL -->|Parquet| NL[(S3 network logs<br/>Parquet + KMS)]
+    DNS -->|JSON| FH[Firehose<br/>JSON to Parquet] --> NL
+    NL -->|read in place| ATH
     FW -->|Advanced verdict events| EB
 
     CT -->|log stream| CWL[CloudWatch Logs]
@@ -58,7 +62,7 @@ flowchart LR
     CWL -->|metric filters| ALM[26 Metric-filter Alarms]
     EB -->|MatchedEvents alarms| SNS
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
-    S3 -->|read in place| ATH[Athena + Glue<br/>14 saved hunts]
+    S3 -->|read in place| ATH[Athena + Glue<br/>21 saved hunts]
     SCH[Scheduler, daily] --> SFN[Step Functions] -->|scheduled variants| ATH
     SFN -->|findings / failures| SNS
 
@@ -222,7 +226,7 @@ in S3 rather than the CloudWatch stream. The `threat-hunting` module adds:
 - **An Athena workgroup** (engine v3) whose settings are enforced: results go
   only to a dedicated bucket, encrypted with the lab CMK, expiring after 30 days,
   and any single query is cancelled past a scan cap (default 10 GiB).
-- **14 saved queries** in that workgroup, each mapped to ATT&CK:
+- **21 saved queries** in that workgroup, each mapped to ATT&CK. 01-14 use CloudTrail; 15-21 use the network log lake (below):
 
 | # | Hunt | What it finds | MITRE ATT&CK |
 |---|------|---------------|--------------|
@@ -240,10 +244,48 @@ in S3 rather than the CloudWatch stream. The `threat-hunting` module adds:
 | 12 | Root activity | Everything root did, with MFA status | T1078.004 |
 | 13 | New role-assumption path | Caller-to-role pairs never seen before, cross-account flagged | T1078.004 / T1550.001 |
 | 14 | Investigate an access key | Full ordered timeline for one key (pivot, not a hunt) | - |
+| 15 | DNS beaconing | One name resolved at machine-regular intervals (low jitter), A/AAAA pairs collapsed | T1071.004 / T1029 |
+| 16 | New, rare domain | Domain first seen recently and by only one instance | T1568 / T1071.004 |
+| 17 | DNS tunnelling shape | 50+ unique long-labelled names under one parent in an hour | T1071.004 / T1048.003 |
+| 18 | New external transfer | 100 MiB+ egress to a public IP the instance never used before (AWS endpoints excluded) | T1048 / T1567 |
+| 19 | Internal sweep | One host contacting 20+ internal hosts or 50+ ports in an hour | T1046 / TA0008 |
+| 20 | Egress without DNS | Connections to public IPs the instance never resolved (flow ⨝ DNS): hard-coded C2 | TA0011 / T1071 |
+| 21 | Investigate an instance | One timeline across CloudTrail, DNS and flows for an instance (pivot) | - |
 
 - **A hunter IAM policy** (`hunter_policy_arn` output) to attach to the people
   who hunt: run queries in this workgroup, read the catalog, **read-only** on
-  the CloudTrail prefix (hunting can never alter evidence), and use the lab key.
+  the CloudTrail and network-log prefixes (hunting can never alter evidence), and
+  use the lab key.
+
+### Network log lake (flow and DNS in Parquet)
+
+CloudWatch Logs is where the network detections run, but it is an expensive
+place to keep months of flow and DNS records, and it cannot join them with
+CloudTrail. The lake (`enable_network_log_lake`, on by default) keeps a second
+copy of both in S3 as Parquet, in the hunting database:
+
+- **Flow logs** are delivered natively as Parquet by a second, S3-destined flow
+  log per monitored VPC. Its format adds `pkt-src/dst-aws-service` (so egress
+  hunts can exclude AWS endpoints) and `traffic-path`. Column types follow AWS's
+  documented Parquet schema exactly, since a mismatch fails at read time.
+- **Resolver query logs** cannot be written as Parquet, so a second query-log
+  config sends them to Firehose, which converts each JSON record to Parquet using
+  the Athena table itself as its schema: conversion and querying cannot
+  disagree. Conversion errors land under `route53resolver-errors/` and in
+  CloudWatch, never silently dropped.
+- **Same layout as CloudTrail.** All three tables use partition projection on
+  `dt = yyyy/MM/dd`, so every hunt filters dates the same way, and new days are
+  queryable without crawlers.
+- Hunts 15-21 are saved only when their tables exist (each declares
+  `-- requires:` in its header), so turning the lake off never leaves broken
+  queries behind.
+
+Two things to know: AWS allows **2 flow logs per VPC**, and this adds the
+second; a monitored VPC that already has a flow log elsewhere will fail to apply
+(set `enable_network_log_lake = false`, or remove the other flow log). And DNS
+records reach S3 when Firehose's buffer flushes, every 5 minutes by default.
+The network hunts are not in the default daily schedule (it must work with the
+lake off); add 15-20 to `scheduled_hunts` once the lake is on.
 
 **The hunts are tested.** `tests/hunts/test_hunts.py` renders each query the way
 Terraform does, transpiles it to DuckDB and runs it against synthetic CloudTrail
@@ -303,6 +345,7 @@ $(terraform output -raw run_scheduled_hunts_now)
 
 - Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
 - AWS CLI v2 and bash, authenticated to a **non-production / sandbox account** you can afford to deploy managed services in (the CLI is also used at plan time to resolve DNS Firewall managed-list IDs)
+- The deploying identity also needs `logs:CreateLogDelivery`, `firehose:TagDeliveryStream` and, the first time, `iam:CreateServiceLinkedRole` for `AWSServiceRoleForLogDelivery`, which Resolver uses to deliver into Firehose
 - Permissions to create IAM, CloudTrail, Config, GuardDuty, Security Hub, SNS, EventBridge, Lambda, KMS and S3 resources
 
 ## Deploy
@@ -371,6 +414,11 @@ Destroy it when you are done.
   the AWS-managed lists carry no charge of their own. **DNS Firewall Advanced**
   is priced separately per query inspected; check the Route 53 pricing page
   before enabling it on a busy VPC.
+- **Network log lake:** flow logs and Resolver logs delivered to S3 bill as
+  CloudWatch vended-log delivery (Parquet conversion of flow logs is priced
+  separately), plus Firehose ingestion and format conversion for DNS, plus S3
+  storage, which Parquet keeps small. Negligible on the lab VPC; budget for it
+  on a busy monitored VPC, or turn the lake off there.
 - **Athena** bills per byte scanned. Every saved hunt filters on the day
   partition, and the workgroup cancels any query past
   `hunting_bytes_scanned_cutoff` (10 GiB by default), so a mistaken unfiltered
@@ -405,6 +453,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── dns-firewall/      # DNS Firewall rule group, managed + custom lists
 │   ├── detections/        # detection-as-code catalogue (metric filters)
 │   ├── alerting/          # SNS + EventBridge routing
+│   ├── network-log-lake/  # S3 bucket, Firehose JSON->Parquet for DNS, flow + DNS Athena tables
 │   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql)
 │   ├── scheduled-hunts/   # daily schedule: Scheduler -> Step Functions (ASL template) -> SNS, alarms
 │   ├── response/          # opt-in Lambda auto-response
@@ -420,9 +469,10 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] VPC Flow Logs + Route 53 Resolver query logging modules, with network and DNS detections
 - [x] Route 53 Resolver DNS Firewall with managed threat domain lists (block, not just detect)
 - [x] DNS Firewall Advanced (native DGA, dictionary-DGA and DNS-tunnelling rules), via `hashicorp/aws` 6.x
-- [x] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries (14 tested hunts)
+- [x] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries
 - [x] Scheduled hunts: run selected saved queries daily and alert on non-empty results (once per finding, with a dead man's switch)
-- [ ] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail
+- [x] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail (7 network and cross-source hunts; 21 tested hunts in total)
+- [ ] Enrich hunts with threat intelligence: a curated IP/domain indicator table joined against flow and DNS
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

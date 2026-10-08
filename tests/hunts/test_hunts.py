@@ -30,7 +30,8 @@ import sqlglot
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE = ROOT / "modules" / "threat-hunting"
-DB, TABLE = "detlab_security", "cloudtrail"
+LAKE = ROOT / "modules" / "network-log-lake"
+DB, TABLE, FLOW, DNS = "detlab_security", "cloudtrail", "vpc_flow_logs", "resolver_query_logs"
 ACCT = "111122223333"
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 BASELINE = NOW - timedelta(days=10)
@@ -58,6 +59,8 @@ def glue_to_duckdb(t):
     t = t.strip()
     if t == "string":
         return "VARCHAR"
+    if t in ("int", "bigint"):
+        return {"int": "INTEGER", "bigint": "BIGINT"}[t]
     if t.startswith("struct<"):
         fields = []
         for f in _split_top(t[7:-1]):
@@ -86,6 +89,18 @@ def module_schema():
     return cols + [("region", "string"), ("dt", "string")]
 
 
+def lake_schema(list_name):
+    """Columns of flow_columns / dns_columns in modules/network-log-lake/main.tf."""
+    src = (LAKE / "main.tf").read_text()
+    block = re.search(rf"{list_name} = \[(.*?)\n  \]", src, re.S).group(1)
+    cols = re.findall(r'\["(\w+)",\s*"([^"]+)"\]', block)
+    assert cols, f"no columns parsed for {list_name}"
+    return cols + [("dt", "string")]
+
+
+SCHEMAS = {TABLE: module_schema, FLOW: lambda: lake_schema("flow_columns"), DNS: lambda: lake_schema("dns_columns")}
+
+
 # --- Rendering: same substitutions Terraform's templatefile() makes ----------
 
 def _fill(template, values):
@@ -97,7 +112,8 @@ def _fill(template, values):
 
 def render_athena(name, lookback_days=30, recent_days=1):
     return _fill((MODULE / "queries" / f"{name}.sql").read_text(),
-                 {"database": DB, "table": TABLE, "lookback_days": lookback_days, "recent_days": recent_days})
+                 {"database": DB, "table": TABLE, "flow_table": FLOW, "dns_table": DNS,
+                  "lookback_days": lookback_days, "recent_days": recent_days})
 
 
 def render(name, lookback_days=30, recent_days=1):
@@ -167,22 +183,51 @@ def ev(name, source, at, ident, ip="198.51.100.10", err=None, req=None, resp=Non
 FIXTURES = {}
 
 
+def flow(at, src, dst, dport, *, instance="i-0web", action="ACCEPT", direction="egress", nbytes=1000,
+         sport=40000, aws_service=None):
+    epoch = int(at.timestamp())
+    return {"__table": FLOW, "version": 5, "account_id": ACCT, "interface_id": "eni-1", "srcaddr": src,
+            "dstaddr": dst, "srcport": sport, "dstport": dport, "protocol": 6, "packets": 10, "bytes": nbytes,
+            "start": epoch, "end": epoch + 60, "action": action, "log_status": "OK", "vpc_id": "vpc-1",
+            "subnet_id": "subnet-1", "instance_id": instance, "tcp_flags": 2, "type": "IPv4",
+            "pkt_srcaddr": src, "pkt_dstaddr": dst, "flow_direction": direction,
+            "pkt_src_aws_service": None, "pkt_dst_aws_service": aws_service, "traffic_path": 8,
+            "dt": at.strftime("%Y/%m/%d")}
+
+
+def dns(at, instance, name, qtype="A", rcode="NOERROR", answers=(), firewall=None):
+    return {"__table": DNS, "version": "1.100000", "account_id": ACCT, "region": "eu-west-1", "vpc_id": "vpc-1",
+            "query_timestamp": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "query_name": name + ".", "query_type": qtype,
+            "query_class": "IN", "rcode": rcode,
+            "answers": [{"rdata": a, "type": "A", "class": "IN"} for a in answers],
+            "srcaddr": "10.42.1.10", "srcport": "53000", "transport": "UDP",
+            "srcids": {"instance": instance, "resolver_endpoint": None},
+            "firewall_rule_action": firewall, "firewall_rule_group_id": None, "firewall_domain_list_id": None,
+            "dt": at.strftime("%Y/%m/%d")}
+
+
 def run(name, events, **render_kw):
     FIXTURES[name] = events
     return run_sql(render(name, **render_kw), events)
 
 
 def run_sql(sql, events):
+    """events: dicts; a "__table" key routes them to flow or dns (default CloudTrail)."""
     con = duckdb.connect()
     con.execute("SET TimeZone = 'UTC'")
     con.execute(f"CREATE SCHEMA {DB}")
-    schema = module_schema()
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        for e in events:
-            fh.write(json.dumps(e) + "\n")
-    cols = ", ".join(f"'{n}': '{glue_to_duckdb(t)}'" for n, t in schema)
-    con.execute(f"CREATE TABLE {DB}.{TABLE} AS SELECT * FROM read_json('{fh.name}', "
-                f"format='newline_delimited', columns={{{cols}}})")
+    for table, schema_fn in SCHEMAS.items():
+        schema = schema_fn()
+        cols = ", ".join(f'"{n}" {glue_to_duckdb(t)}' for n, t in schema)
+        con.execute(f"CREATE TABLE {DB}.{table} ({cols})")
+        rows = [{k: v for k, v in e.items() if k != "__table"} for e in events if e.get("__table", TABLE) == table]
+        if rows:
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+                for r in rows:
+                    fh.write(json.dumps(r) + "\n")
+            spec = ", ".join(f"'{n}': '{glue_to_duckdb(t)}'" for n, t in schema)
+            con.execute(f"INSERT INTO {DB}.{table} SELECT * FROM read_json('{fh.name}', "
+                        f"format='newline_delimited', columns={{{spec}}})")
     cur = con.execute(sql)
     names = [d[0] for d in cur.description]
     return [dict(zip(names, row)) for row in cur.fetchall()]
@@ -380,12 +425,115 @@ def test_14_investigate_access_key():
     assert [r["eventname"] for r in rows] == ["ListBuckets", "GetCallerIdentity"], rows
 
 
+def test_15_dns_beaconing():
+    start = RECENT - timedelta(minutes=5 * 20)
+    events = []
+    for i in range(20):                                   # implant: every 300s +/- 3s, A and AAAA together
+        t = start + timedelta(seconds=300 * i + (i % 3) - 1)
+        events += [dns(t, "i-0beacon", "c2.evil-cdn.net"), dns(t, "i-0beacon", "c2.evil-cdn.net", "AAAA")]
+    for i, gap in enumerate([30, 400, 90, 1200, 15, 700, 60, 300, 2000, 45, 500, 120, 900, 20]):
+        start += timedelta(seconds=gap)                   # human/app: irregular
+        events.append(dns(start, "i-0app", "api.partner.com"))
+    for i in range(20):                                   # periodic by design: excluded
+        events.append(dns(RECENT - timedelta(minutes=60 * i), "i-0app", "ssm.eu-west-1.amazonaws.com"))
+        events.append(dns(RECENT - timedelta(minutes=30 * i), "i-0app", "ip-10-42-1-5.eu-west-1.compute.internal"))
+    rows = run("15_dns_beaconing", events)
+    assert [(r["instance"], r["domain"]) for r in rows] == [("i-0beacon", "c2.evil-cdn.net")], rows
+    assert 295 <= rows[0]["avg_interval_seconds"] <= 305 and rows[0]["jitter"] < 0.05, rows
+
+
+def test_16_dns_new_rare_domain():
+    events = [dns(BASELINE, f"i-0{n}", "www.github.com") for n in "abc"]
+    events += [dns(RECENT, "i-0a", "api.github.com"),                       # old, wide domain
+               dns(RECENT, "i-0x", "update.qzv81-cdn.top"),                 # new, one instance
+               dns(RECENT - timedelta(minutes=5), "i-0x", "cfg.qzv81-cdn.top")]
+    events += [dns(RECENT, f"i-0{n}", "login.newsaas.io") for n in "abc"]   # new but wide: not rare
+    events += [dns(RECENT, "i-0x", "ip-10-0-0-1.eu-west-1.compute.internal")]  # internal: excluded
+    rows = run("16_dns_new_rare_domain", events)
+    assert [(r["domain"], r["instance"], r["lookups"]) for r in rows] == [("qzv81-cdn.top", "i-0x", 2)], rows
+
+
+def test_17_dns_tunnel_shape():
+    import random, string
+    rnd = random.Random(7)
+    label = lambda n: "".join(rnd.choices(string.ascii_lowercase + string.digits, k=n))
+    events = [dns(HOUR + timedelta(seconds=20 * i), "i-0tun", f"{label(40)}.t.exfil-dom.com", "TXT") for i in range(80)]
+    events += [dns(HOUR + timedelta(seconds=20 * i), "i-0cdn", f"img{i}.static.cdn-site.com") for i in range(60)]  # short labels
+    events += [dns(HOUR + timedelta(seconds=60 * i), "i-0few", f"{label(40)}.x.other-dom.com") for i in range(10)]  # too few
+    rows = run("17_dns_tunnel_shape", events)
+    assert [(r["instance"], r["parent_domain"], r["unique_names"]) for r in rows] == [("i-0tun", "exfil-dom.com", 80)], rows
+
+
+def test_18_flow_new_external_transfer():
+    MiB = 1048576
+    rows = run("18_flow_new_external_transfer", [
+        flow(BASELINE, "10.42.1.10", "203.0.113.10", 443, instance="i-0web", nbytes=900 * MiB),
+        flow(RECENT, "10.42.1.10", "203.0.113.10", 443, instance="i-0web", nbytes=500 * MiB),   # known destination
+        flow(RECENT, "10.42.1.20", "198.51.100.200", 443, instance="i-0db", nbytes=180 * MiB),  # new + large
+        flow(RECENT, "10.42.1.20", "198.51.100.201", 443, instance="i-0db", nbytes=5 * MiB),    # new but small
+        flow(RECENT, "10.42.1.20", "10.42.2.5", 5432, instance="i-0db", nbytes=2000 * MiB),     # internal
+        flow(RECENT, "10.42.1.20", "52.95.1.1", 443, instance="i-0db", nbytes=900 * MiB, aws_service="S3"),
+        flow(RECENT, "10.42.1.20", "100.64.0.9", 443, instance="i-0db", nbytes=900 * MiB),      # CGNAT range: private
+    ])
+    assert [(r["instance_id"], r["dstaddr"], r["mib_out"]) for r in rows] == [("i-0db", "198.51.100.200", 180.0)], rows
+
+
+def test_19_flow_internal_scan():
+    events = [flow(HOUR + timedelta(seconds=i), "10.42.1.9", f"10.42.{i // 200}.{i % 200 + 1}", 22,
+                   instance="i-0pwned", action="REJECT" if i % 3 else "ACCEPT") for i in range(30)]
+    events += [flow(HOUR + timedelta(seconds=i), "10.42.1.9", "10.42.1.50", 1000 + i, instance="i-0pwned") for i in range(5)]
+    events += [flow(HOUR + timedelta(minutes=i), "10.42.1.10", f"10.42.1.{i + 60}", 443, instance="i-0web") for i in range(3)]
+    events += [flow(HOUR + timedelta(seconds=i), "10.42.1.11", f"198.51.100.{i}", 443, instance="i-0crawler") for i in range(40)]
+    rows = run("19_flow_internal_scan", events)
+    assert [(r["srcaddr"], r["hosts"]) for r in rows] == [("10.42.1.9", 31)], rows
+    assert rows[0]["rejected"] == 20, rows
+
+
+def test_20_flow_egress_without_dns():
+    rows = run("20_flow_egress_without_dns", [
+        dns(RECENT - timedelta(minutes=10), "i-0a", "good.example.com", answers=["203.0.113.20"]),
+        flow(RECENT, "10.42.1.10", "203.0.113.20", 443, instance="i-0a"),              # resolved first
+        flow(RECENT, "10.42.1.10", "198.51.100.66", 8443, instance="i-0a"),            # never resolved
+        flow(RECENT, "10.42.1.10", "10.42.9.9", 443, instance="i-0a"),                 # internal
+        dns(RECENT - timedelta(days=3), "i-0b", "old.example.com", answers=["203.0.113.77"]),
+        flow(RECENT, "10.42.1.11", "203.0.113.77", 443, instance="i-0b"),              # resolved too long ago
+        dns(RECENT - timedelta(minutes=5), "i-0c", "x.example.com", answers=["203.0.113.88"]),
+        flow(RECENT, "10.42.1.12", "203.0.113.88", 443, instance="i-0d"),              # resolved by ANOTHER instance
+    ])
+    got = sorted((r["instance_id"], r["dstaddr"]) for r in rows)
+    assert got == [("i-0a", "198.51.100.66"), ("i-0b", "203.0.113.77"), ("i-0d", "203.0.113.88")], got
+
+
+def test_21_investigate_instance():
+    me = "i-0123456789abcdef0"
+    role = role_session("web-role", me, principal_suffix=me)
+    rows = run("21_investigate_instance", [
+        ev("RunInstances", "ec2.amazonaws.com", RECENT - timedelta(hours=1), user("ops"),
+           req={"instanceType": "t3.micro"}, resp={"instancesSet": {"items": [{"instanceId": me}]}}),
+        dns(RECENT - timedelta(minutes=30), me, "c2.evil-cdn.net", firewall="BLOCK"),
+        flow(RECENT - timedelta(minutes=20), "10.42.1.10", "198.51.100.66", 8443, instance=me, nbytes=4096),
+        ev("ListBuckets", "s3.amazonaws.com", RECENT - timedelta(minutes=10), role, "198.51.100.66"),
+        ev("ListBuckets", "s3.amazonaws.com", RECENT, user("other")),               # unrelated
+        dns(RECENT, "i-0other", "example.com"), flow(RECENT, "10.42.1.99", "1.1.1.1", 53, instance="i-0other"),
+    ])
+    assert [r["source"] for r in rows] == ["cloudtrail: about instance", "dns", "flow", "cloudtrail: by instance"], rows
+    assert rows[1]["outcome"] == "BLOCK" and "8443" in rows[2]["detail"] and "4096 bytes" in rows[2]["detail"], rows
+
+
 def shift(events, delta):
     out = []
     for e in events:
         e = dict(e)
-        t = datetime.strptime(e["eventtime"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + delta
-        e["eventtime"], e["dt"] = t.strftime("%Y-%m-%dT%H:%M:%SZ"), t.strftime("%Y/%m/%d")
+        table = e.get("__table", TABLE)
+        if table == FLOW:
+            e["start"] += int(delta.total_seconds())
+            e["end"] += int(delta.total_seconds())
+            t = datetime.fromtimestamp(e["start"], timezone.utc)
+        else:
+            key = "query_timestamp" if table == DNS else "eventtime"
+            t = datetime.strptime(e[key], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + delta
+            e[key] = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        e["dt"] = t.strftime("%Y/%m/%d")
         out.append(e)
     return out
 
@@ -424,7 +572,7 @@ def test_scheduled_sql_parses_as_athena():
 
 def test_only_pivots_are_unschedulable():
     unschedulable = {p.stem for p in (MODULE / "queries").glob("*.sql")} - set(schedulable())
-    assert unschedulable == {"14_investigate_access_key"}, unschedulable
+    assert unschedulable == {"14_investigate_access_key", "21_investigate_instance"}, unschedulable
 
 
 def test_default_schedule_names_only_schedulable_hunts():

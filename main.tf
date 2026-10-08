@@ -73,6 +73,15 @@ module "lab_vpc" {
 }
 
 locals {
+  # Network log lake (Parquet in S3 + Athena). Name computed here so modules can
+  # reference it without depending on each other.
+  network_logs_bucket = "${var.name_prefix}-network-logs-${local.account_id}-${local.region}"
+  lake_flow           = var.enable_network_log_lake && var.enable_threat_hunting && var.enable_vpc_flow_logs
+  lake_dns            = var.enable_network_log_lake && var.enable_threat_hunting && var.enable_dns_query_logging
+  lake                = local.lake_flow || local.lake_dns
+}
+
+locals {
   # Static keys so for_each is plannable even though the lab VPC id is computed.
   monitored_vpcs = merge(
     var.create_lab_vpc ? { lab = module.lab_vpc[0].vpc_id } : {},
@@ -91,6 +100,9 @@ module "vpc_flow_logs" {
   account_id         = local.account_id
   partition          = local.partition
   region             = local.region
+
+  enable_s3_parquet = local.lake_flow
+  s3_bucket_arn     = local.lake_flow ? module.network_log_lake[0].bucket_arn : null
 }
 
 module "dns_query_logging" {
@@ -104,6 +116,9 @@ module "dns_query_logging" {
   account_id         = local.account_id
   partition          = local.partition
   region             = local.region
+
+  enable_firehose_destination = local.lake_dns
+  firehose_arn                = local.lake_dns ? module.network_log_lake[0].firehose_arn : null
 }
 
 # 6. DNS Firewall: enforce, not just observe. Lab VPC only unless opted in.
@@ -190,6 +205,32 @@ module "threat_hunting" {
   recent_days            = var.hunting_recent_days
   bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
   scheduled_hunts        = var.enable_scheduled_hunts ? var.scheduled_hunts : []
+
+  available_sources = concat(
+    ["cloudtrail"],
+    local.lake_flow ? ["flow"] : [],
+    local.lake_dns ? ["dns"] : [],
+  )
+  network_logs_bucket_arn = local.lake ? "arn:${local.partition}:s3:::${local.network_logs_bucket}" : null
+}
+
+# 8b. Network log lake: flow logs + Resolver query logs as Parquet in S3, with
+#     Athena tables in the hunting database.
+module "network_log_lake" {
+  source = "./modules/network-log-lake"
+  count  = local.lake ? 1 : 0
+
+  name_prefix      = var.name_prefix
+  account_id       = local.account_id
+  partition        = local.partition
+  region           = local.region
+  bucket_name      = local.network_logs_bucket
+  kms_key_arn      = module.logging.kms_key_arn
+  database_name    = module.threat_hunting[0].database
+  enable_flow      = local.lake_flow
+  enable_dns       = local.lake_dns
+  projection_start = var.hunting_projection_start
+  retention_days   = var.network_lake_retention_days
 }
 
 # 9. Scheduled hunts: run selected saved hunts daily, alert only on findings.

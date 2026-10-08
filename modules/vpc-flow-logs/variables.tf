@@ -20,3 +20,14 @@ variable "traffic_type" {
   type        = string
   default     = "ALL"
 }
+
+variable "enable_s3_parquet" {
+  description = "Also deliver flow logs to S3 as Parquet for Athena hunting. This is a second flow log per VPC: AWS allows 2 per VPC, so a monitored VPC that already has one elsewhere will fail."
+  type        = bool
+  default     = false
+}
+
+variable "s3_bucket_arn" {
+  type    = string
+  default = null
+}

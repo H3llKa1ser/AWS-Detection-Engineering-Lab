@@ -60,3 +60,19 @@ resource "aws_route53_resolver_query_log_config_association" "vpc" {
   resolver_query_log_config_id = aws_route53_resolver_query_log_config.main.id
   resource_id                  = each.value
 }
+
+# Second config, Firehose destination, for the Parquet lake. The caller needs
+# logs:CreateLogDelivery, firehose:TagDeliveryStream and, the first time,
+# iam:CreateServiceLinkedRole for AWSServiceRoleForLogDelivery.
+resource "aws_route53_resolver_query_log_config" "firehose" {
+  count           = var.enable_firehose_destination ? 1 : 0
+  name            = "${var.name_prefix}-dns-query-logs-firehose"
+  destination_arn = var.firehose_arn
+}
+
+resource "aws_route53_resolver_query_log_config_association" "firehose" {
+  for_each = var.enable_firehose_destination ? var.vpc_ids : {}
+
+  resolver_query_log_config_id = aws_route53_resolver_query_log_config.firehose[0].id
+  resource_id                  = each.value
+}

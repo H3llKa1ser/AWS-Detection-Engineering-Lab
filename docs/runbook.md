@@ -237,3 +237,44 @@ until this alarm is OK again.
 Add or remove names in `scheduled_hunts` and apply. Before scheduling 04, 10 or
 11, run them by hand for a week and tune the thresholds in their SQL so a normal
 day is empty.
+
+## Network hunts (flow and DNS)
+
+**15 DNS beaconing.** A low `jitter` with a steady `avg_interval_seconds` means
+software, not a person. Look up the domain: unknown or newly registered, plus an
+instance with no reason to poll it, is a likely implant. Run 21 on the instance.
+Benign pollers (agents, update checks) go into the hunt's exclusion regex.
+
+**16 New, rare domain.** One instance, never-before-seen domain. Check
+registration age and reputation, then what the instance did right after (21).
+Common benign cause: a developer testing a new SaaS from one box.
+
+**17 DNS tunnelling shape.** Group by `parent_domain`. Long random first labels
+at volume mean data in DNS. Check DNS Firewall verdicts for the same names and
+how long it has been going on (widen `dt`). Treat as exfiltration until
+disproved.
+
+**18 New external transfer.** Large upload to a destination the instance never
+used. Identify what the destination is (IP owner, ports). Backups and new
+integrations are common; unexplained transfers from data-holding instances are
+not.
+
+**19 Internal sweep.** Many internal hosts or ports from one source in an hour.
+Many `rejected` means it was probing; check what was accepted, and whether the
+source is a known scanner or monitoring host.
+
+**20 Egress without DNS.** The instance connected to public IPs it never
+resolved. Hard-coded IPs are a classic C2 trait, but also check for instances
+using their own resolver (which bypasses Resolver logs and DNS Firewall, itself
+a finding) and for software that connects by IP by design.
+
+**21 Investigate an instance.** Replace the placeholder instance ID. The
+`cloudtrail: about instance` rows show who launched or changed it; `by instance`
+rows show what its role credentials did.
+
+### Lake health
+
+If a network hunt returns nothing for days on a busy VPC, check delivery before
+trusting the silence (see "Network log lake" in validation.md): Firehose
+conversion errors, the `LogDeliveryEnabled` tag, and the S3 flow log's
+delivery status.

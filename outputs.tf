@@ -97,3 +97,12 @@ output "run_scheduled_hunts_now" {
   description = "CLI command to run the scheduled hunts immediately with the schedule's own input."
   value       = length(module.scheduled_hunts) > 0 ? module.scheduled_hunts[0].run_now : null
 }
+
+output "network_log_lake" {
+  description = "Network Parquet tables in the hunting database (null when the lake is disabled)."
+  value = local.lake ? {
+    bucket     = local.network_logs_bucket
+    flow_table = local.lake_flow ? "${module.threat_hunting[0].database}.${module.network_log_lake[0].flow_table}" : null
+    dns_table  = local.lake_dns ? "${module.threat_hunting[0].database}.${module.network_log_lake[0].dns_table}" : null
+  } : null
+}

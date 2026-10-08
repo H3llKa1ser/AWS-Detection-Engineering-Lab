@@ -342,3 +342,17 @@ variable "hunt_schedule_timezone" {
   type        = string
   default     = "UTC"
 }
+
+# --- Network log lake (Parquet in S3 for hunting) ------------------------------------
+
+variable "enable_network_log_lake" {
+  description = "Also deliver VPC Flow Logs (native Parquet) and Resolver query logs (via Firehose to Parquet) to S3, with Athena tables and network hunts. Needs enable_threat_hunting. Adds a second flow log per monitored VPC (AWS allows 2)."
+  type        = bool
+  default     = true
+}
+
+variable "network_lake_retention_days" {
+  description = "Days flow and DNS Parquet files are kept in S3 (CloudWatch copies keep network_log_retention_days)."
+  type        = number
+  default     = 90
+}

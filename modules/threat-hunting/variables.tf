@@ -52,3 +52,25 @@ variable "schedule_lag_hours" {
   type        = number
   default     = 1
 }
+
+variable "available_sources" {
+  description = "Telemetry with an Athena table: cloudtrail always; flow and dns when the network log lake is deployed. Hunts requiring a missing source are not saved."
+  type        = list(string)
+  default     = ["cloudtrail"]
+}
+
+variable "flow_table" {
+  type    = string
+  default = "vpc_flow_logs"
+}
+
+variable "dns_table" {
+  type    = string
+  default = "resolver_query_logs"
+}
+
+variable "network_logs_bucket_arn" {
+  description = "Network log bucket the hunter may read (null when the lake is not deployed)."
+  type        = string
+  default     = null
+}

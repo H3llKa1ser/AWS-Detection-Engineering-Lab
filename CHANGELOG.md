@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.0: Network log lake (flow and DNS in Parquet) and network hunts
+
+### Added
+- `modules/network-log-lake`: KMS-encrypted S3 bucket for network logs; Athena
+  tables `vpc_flow_logs` and `resolver_query_logs` with `dt` partition
+  projection (same scheme as CloudTrail); Firehose stream converting Resolver
+  JSON to Parquet using the Athena table as its schema, with error output and
+  CloudWatch error logging.
+- Second, S3-destined flow log per VPC delivering native Parquet with the
+  AWS-service and traffic-path fields; second Resolver query-log config
+  targeting Firehose.
+- Hunts 15-21: DNS beaconing, new rare domains, DNS tunnelling shape, new
+  external transfers, internal sweeps, egress without DNS (flow ⨝ DNS), and a
+  cross-source instance timeline. 15-20 are schedulable.
+- `-- requires:` header: hunts are saved and schedulable only when their tables
+  exist.
+- Hunter policy: read-only access to the network log prefixes.
+- Tests: three-table harness with schemas parsed from both modules; tests and
+  mutation checks for the seven new hunts.
+- Root variables `enable_network_log_lake`, `network_lake_retention_days`;
+  output `network_log_lake`.
+
+### Changed
+- Lab CMK key policy allows vended log delivery (`delivery.logs.amazonaws.com`,
+  scoped to this account's log sources) to write SSE-KMS objects.
+- Validation doc: test-count expectations replaced with "all passed" (the
+  hard-coded counts had already gone stale).
+
+### Note
+- AWS allows 2 flow logs per VPC; the lake uses the second on each monitored VPC.
+
 ## 0.6.0: Scheduled hunts
 
 ### Added

@@ -14,3 +14,14 @@ variable "kms_key_arn" {
   type    = string
   default = null
 }
+
+variable "enable_firehose_destination" {
+  description = "Also send query logs to Firehose (for Parquet in S3). A VPC can deliver to one destination of each type, so this sits alongside the CloudWatch config."
+  type        = bool
+  default     = false
+}
+
+variable "firehose_arn" {
+  type    = string
+  default = null
+}

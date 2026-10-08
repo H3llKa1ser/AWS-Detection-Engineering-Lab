@@ -20,7 +20,7 @@ output "hunter_policy_arn" {
 
 output "saved_hunts" {
   description = "Saved query name => ATT&CK mapping."
-  value       = { for k, q in local.queries : "${k}: ${q.title}" => q.attack }
+  value       = { for k, q in local.deployable : "${k}: ${q.title}" => q.attack }
 }
 
 output "scheduled_hunts" {

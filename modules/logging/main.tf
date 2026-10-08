@@ -23,6 +23,18 @@ resource "aws_kms_key" "logs" {
     Version = "2012-10-17"
     Statement = [
       {
+        # VPC Flow Logs writing Parquet to the SSE-KMS network log bucket.
+        Sid       = "AllowVendedLogDeliveryToS3"
+        Effect    = "Allow"
+        Principal = { Service = "delivery.logs.amazonaws.com" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.account_id }
+          ArnLike      = { "aws:SourceArn" = "arn:${var.partition}:logs:${var.region}:${var.account_id}:*" }
+        }
+      },
+      {
         Sid       = "EnableRoot"
         Effect    = "Allow"
         Principal = { AWS = "arn:${var.partition}:iam::${var.account_id}:root" }

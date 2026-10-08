@@ -23,6 +23,17 @@ locals {
   ])
 }
 
+# Parquet copy for Athena: the CloudWatch format plus the AWS-service fields
+# (so egress hunts can tell AWS endpoints from the internet) and traffic-path.
+# Parquet columns are read by name; names must match the network-log-lake
+# table (hyphens become underscores).
+locals {
+  s3_log_format = join(" ", [
+    local.log_format,
+    "$${pkt-src-aws-service}", "$${pkt-dst-aws-service}", "$${traffic-path}",
+  ])
+}
+
 resource "aws_cloudwatch_log_group" "flow" {
   name              = local.log_group_name
   retention_in_days = var.log_retention_days
@@ -87,4 +98,23 @@ resource "aws_flow_log" "vpc" {
   max_aggregation_interval = 60 # 1-minute records: faster detection, same cost per GB
 
   tags = { Name = "${var.name_prefix}-flow-${each.key}" }
+}
+
+resource "aws_flow_log" "s3_parquet" {
+  for_each = var.enable_s3_parquet ? var.vpc_ids : {}
+
+  vpc_id                   = each.value
+  traffic_type             = var.traffic_type
+  log_destination_type     = "s3"
+  log_destination          = var.s3_bucket_arn
+  log_format               = local.s3_log_format
+  max_aggregation_interval = 60
+
+  destination_options {
+    file_format                = "parquet"
+    hive_compatible_partitions = false # plain yyyy/MM/dd path, same as CloudTrail
+    per_hour_partition         = false
+  }
+
+  tags = { Name = "${var.name_prefix}-flow-s3-${each.key}" }
 }

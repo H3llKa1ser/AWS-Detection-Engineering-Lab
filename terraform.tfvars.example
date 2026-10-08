@@ -87,3 +87,8 @@ scheduled_hunts = [
   # Add once tuned for your environment:
   # "04_enumeration_burst", "10_secret_harvesting", "11_instance_credentials_replayed",
 ]
+
+# --- Network log lake (flow + DNS as Parquet in S3, Athena tables, network hunts) ---
+# Adds a second flow log per monitored VPC; AWS allows 2 per VPC.
+enable_network_log_lake     = true
+network_lake_retention_days = 90
