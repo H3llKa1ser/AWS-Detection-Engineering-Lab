@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0: Threat hunting with Athena
+
+### Added
+- `modules/threat-hunting`: Glue database and CloudTrail table over the existing
+  CloudTrail bucket (AWS's JsonSerDe schema, read in place), partition
+  projection on region and day, an enforced Athena engine v3 workgroup with
+  encrypted, expiring results and a per-query scan cap.
+- 14 saved queries mapped to MITRE ATT&CK: new console source, spray-then-success,
+  permission probing, enumeration bursts, IAM persistence, sensor tampering,
+  new-region activity, data shared out, compute hijacking, secret harvesting,
+  replayed instance credentials, root activity, new role-assumption paths, and
+  an access-key investigation timeline.
+- Hunter IAM policy (unattached): query-only, read-only on CloudTrail.
+- `tests/hunts/`: behavioural tests for every query (planted attack vs benign
+  look-alikes) in DuckDB via sqlglot, schema parsed from the module,
+  mutation-checked. Runs without AWS.
+- Root variables `enable_threat_hunting`, `hunting_projection_start`,
+  `hunting_lookback_days`, `hunting_recent_days`, `hunting_bytes_scanned_cutoff`.
+
 ## 0.4.0: DNS Firewall Advanced, AWS provider 6.x
 
 ### Added

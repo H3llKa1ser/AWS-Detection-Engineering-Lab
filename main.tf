@@ -173,7 +173,25 @@ module "detections" {
   )
 }
 
-# 8. Optional traffic generator that exercises the DNS detections.
+# 8. Threat hunting: Athena + Glue over the CloudTrail bucket, saved hunts.
+module "threat_hunting" {
+  source = "./modules/threat-hunting"
+  count  = var.enable_threat_hunting ? 1 : 0
+
+  name_prefix            = var.name_prefix
+  account_id             = local.account_id
+  partition              = local.partition
+  region                 = local.region
+  cloudtrail_bucket_name = module.logging.cloudtrail_bucket_name
+  cloudtrail_bucket_arn  = module.logging.cloudtrail_bucket_arn
+  kms_key_arn            = module.logging.kms_key_arn
+  projection_start       = var.hunting_projection_start
+  lookback_days          = var.hunting_lookback_days
+  recent_days            = var.hunting_recent_days
+  bytes_scanned_cutoff   = var.hunting_bytes_scanned_cutoff
+}
+
+# 9. Optional traffic generator that exercises the DNS detections.
 module "traffic_generator" {
   source = "./modules/traffic-generator"
   count  = var.deploy_traffic_generator && var.create_lab_vpc ? 1 : 0
@@ -190,7 +208,7 @@ check "traffic_generator_needs_lab_vpc" {
   }
 }
 
-# 9. Optional automated response to high-signal GuardDuty findings.
+# 10. Optional automated response to high-signal GuardDuty findings.
 module "response" {
   source = "./modules/response"
   count  = var.enable_response_automation ? 1 : 0

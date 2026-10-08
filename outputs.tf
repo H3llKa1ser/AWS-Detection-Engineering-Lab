@@ -67,3 +67,23 @@ output "dns_firewall_advanced_event_log" {
   description = "Log group holding raw DNS Firewall Advanced EventBridge events, for triage."
   value       = var.enable_dns_firewall ? module.dns_firewall[0].advanced_event_log_group : null
 }
+
+output "hunting_workgroup" {
+  description = "Athena workgroup holding the saved hunts (null when disabled)."
+  value       = var.enable_threat_hunting ? module.threat_hunting[0].workgroup : null
+}
+
+output "hunting_table" {
+  description = "Glue/Athena table over CloudTrail, as database.table."
+  value       = var.enable_threat_hunting ? module.threat_hunting[0].table : null
+}
+
+output "hunter_policy_arn" {
+  description = "Attach to the identities that run hunts."
+  value       = var.enable_threat_hunting ? module.threat_hunting[0].hunter_policy_arn : null
+}
+
+output "saved_hunts" {
+  description = "Saved hunt => MITRE ATT&CK mapping."
+  value       = var.enable_threat_hunting ? module.threat_hunting[0].saved_hunts : null
+}

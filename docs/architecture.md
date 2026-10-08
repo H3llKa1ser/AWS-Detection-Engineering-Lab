@@ -186,3 +186,69 @@ new names is one alarm, not hundreds of emails.
 
 These alarms live in the `dns-firewall` module rather than the metric-filter
 catalogue because they are driven by an AWS metric, not a log pattern.
+
+## Threat hunting layer (Athena over CloudTrail)
+
+### Detection vs hunting
+
+The metric-filter detections evaluate one event at a time against a pattern,
+within minutes. Many attacker behaviours are not visible in one event: a new IP
+only means something against a baseline, password spraying is a sequence, a
+replayed instance credential is the same session from two places. Those need
+history and joins, which is what Athena over the S3 copy of CloudTrail gives.
+The two layers share one source of truth (the trail) but read different copies:
+CloudWatch Logs for speed, S3 for depth and retention.
+
+### Table design
+
+- **Read in place.** The Glue table points at
+  `s3://<cloudtrail-bucket>/AWSLogs/<account>/CloudTrail/`. Nothing is copied or
+  converted, so the hunting layer adds no storage and no pipeline to break.
+  Digest files live under `CloudTrail-Digest/` and are outside the location.
+- **Schema.** AWS's current Athena DDL for CloudTrail with
+  `org.apache.hive.hcatalog.data.JsonSerDe` and `CloudTrailInputFormat`.
+  `requestparameters`, `responseelements` and `additionaleventdata` are strings
+  holding JSON; hunts read them with `json_extract_scalar`.
+- **Partition projection** on `region` (enum of the account's enabled regions,
+  read at apply time) and `dt` (`yyyy/MM/dd`, from `hunting_projection_start` to
+  `NOW`). Athena computes partitions from these rules instead of the catalog, so
+  there is no crawler and no partition maintenance, and a new day is queryable
+  as soon as CloudTrail writes it. If you enable a new region, re-apply so the
+  region enum includes it.
+- **`dt` is the delivery day**, used for pruning. Hunts filter on `dt` for cost,
+  then on `eventtime` for precision.
+
+### Workgroup controls
+
+`enforce_workgroup_configuration` stops a client from overriding the result
+location or encryption. Results land in a dedicated bucket (public access
+blocked, TLS-only policy, encrypted with the lab CMK, expiring after
+`results_retention_days`), because query results are extracts of CloudTrail and
+deserve the same protection. `bytes_scanned_cutoff_per_query` cancels any query
+that would scan more than the cap.
+
+### Hunter permissions
+
+`aws_iam_policy.hunter` is created but not attached: attach it to the people or
+roles who hunt. It allows queries only in the hunting workgroup, read-only Glue
+access to the security database, `s3:GetObject` (no write, no delete) on the
+CloudTrail prefix, read/write on the results prefix, and use of the lab key. A
+hunter cannot modify the evidence they are searching.
+
+### Saved queries as code
+
+`modules/threat-hunting/queries/*.sql` are Athena SQL templates with a parsed
+header (`title`, `attack`, `purpose`). Terraform renders them with the
+deployment's database, table and windows (`hunting_lookback_days`,
+`hunting_recent_days`) and saves them as named queries. Adding a hunt means
+adding a file and a test.
+
+### Query tests
+
+`tests/hunts/test_hunts.py` gives each hunt a planted attack and benign
+look-alikes in synthetic CloudTrail, transpiles the rendered query from Athena
+SQL to DuckDB with sqlglot, and asserts the exact result. The table schema is
+parsed from the module, a meta-test fails if a query has no test, and the suite
+has been mutation-checked (removing a key exclusion from a query makes its test
+fail). Limits: it does not exercise Athena itself (partition-projection pruning,
+JsonSerDe parsing of real files, Trino-specific function edge cases).

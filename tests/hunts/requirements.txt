@@ -1,0 +1,3 @@
+duckdb>=1.1
+sqlglot>=25
+pytz  # DuckDB needs it to return TIMESTAMPTZ values to Python

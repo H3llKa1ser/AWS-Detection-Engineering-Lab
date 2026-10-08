@@ -124,6 +124,38 @@ it from `terraform output -json` (detections module output `rendered_patterns`)
 and paste it into **CloudWatch → Log groups → /detlab/vpc-flow-logs → Metric
 filters → Create → Test pattern**.
 
+## Threat-hunting layer
+
+### Offline (no AWS)
+
+```bash
+pip install -r tests/hunts/requirements.txt
+python3 tests/hunts/test_hunts.py     # expect 15/15 passed
+```
+
+### In the account
+
+After `terraform apply`, CloudTrail needs a few minutes to deliver its first
+files. Then, in the `detlab-threat-hunting` workgroup:
+
+```sql
+SELECT dt, region, count(*) AS events
+FROM detlab_security.cloudtrail
+WHERE dt >= date_format(current_date - interval '1' day, '%Y/%m/%d')
+GROUP BY 1, 2
+ORDER BY 1 DESC, 3 DESC
+```
+
+Rows for today mean the table, projection, permissions and KMS access all work.
+An empty result with no error usually means no logs yet; an `Access Denied`
+names the missing permission (bucket, KMS key or results bucket). Run it as an
+identity with only the hunter policy attached to prove that policy is sufficient.
+
+To see a hunt fire for real, run one of the Level 2 actions (for example
+`aws ec2 create-security-group ...`) and check hunt 06, or create and delete an
+access key for a test user from another user and check hunt 05 the next time
+CloudTrail delivers (typically within 5-15 minutes).
+
 ## Level 3 — Adversary emulation (real findings)
 
 Use [Stratus Red Team](https://github.com/DataDog/stratus-red-team) for genuine
@@ -137,4 +169,6 @@ stratus cleanup --all
 ```
 
 `aws.defense-evasion.cloudtrail-stop` is a good end-to-end test: it should trip
-both your `cloudtrail_config_changes` metric filter and a GuardDuty finding.
+both your `cloudtrail_config_changes` metric filter and a GuardDuty finding, and
+show up in hunt 06. Afterwards, run hunts 03 and 04 against the Stratus
+identity: its setup and detonation leave a discovery footprint worth seeing.

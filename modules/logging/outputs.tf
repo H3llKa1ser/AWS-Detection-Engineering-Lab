@@ -2,6 +2,10 @@ output "cloudtrail_bucket_name" {
   value = aws_s3_bucket.cloudtrail.id
 }
 
+output "cloudtrail_bucket_arn" {
+  value = aws_s3_bucket.cloudtrail.arn
+}
+
 output "cloudwatch_log_group_name" {
   value = aws_cloudwatch_log_group.trail.name
 }

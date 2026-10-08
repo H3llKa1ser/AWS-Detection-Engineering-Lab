@@ -61,3 +61,10 @@ dns_firewall_advanced_protections = [
   { protection = "DNS_TUNNELING", action = "BLOCK", confidence = "MEDIUM" },
 ]
 dns_firewall_advanced_alarm_threshold = 1
+
+# --- Threat hunting (Athena over CloudTrail) ---
+enable_threat_hunting        = true
+hunting_projection_start     = "2025/01/01"
+hunting_lookback_days        = 30
+hunting_recent_days          = 1
+hunting_bytes_scanned_cutoff = 10737418240 # 10 GiB per query

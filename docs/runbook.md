@@ -163,3 +163,41 @@ fields @timestamp, `detail.firewall-protection` as protection,
 
 To pivot from a flagged name to every query that host made, take `srcids.instance`
 or `srcaddr` from the matching record in the Resolver query logs.
+
+## Threat hunting (Athena)
+
+### Running hunts
+
+Athena console, workgroup `<prefix>-threat-hunting`, **Saved queries**. Each
+hunt's description gives its purpose and ATT&CK mapping. A suggested weekly
+rotation: 06 (sensor tampering) and 05 (IAM persistence) every time, since they
+are cheap and high-signal; the rest on a rotation or when an alert points at
+them.
+
+### From alert to hunt to investigation
+
+1. **Alert** (metric filter, GuardDuty, DNS Firewall) names an identity, key, IP
+   or instance.
+2. **Hunt** for related behaviour from the same actor: 03 and 04 (did they
+   enumerate?), 05 (did they persist?), 06 (did they blind the sensors?), 07
+   (did they go to another region?), 08 (did data leave?).
+3. **Investigate** with 14: replace the placeholder key and get the full ordered
+   timeline. For role sessions, use the `ASIA...` key from the event.
+4. **Scope** by widening the `dt` filter if the earliest activity sits at the
+   edge of the window.
+
+### Reading results
+
+- An empty result is an answer: record that the hunt ran clean.
+- Baseline hunts (01, 07, 13) need history. In the first days after deployment
+  everything is "new"; their results become meaningful once the baseline window
+  holds normal activity.
+- Hunt 06 also shows your own Terraform changes. Confirm the actor is your
+  deployment identity and matches a change you made.
+- Tune by editing the `.sql` file (thresholds sit in the `HAVING` clause), then
+  update its test with the case that motivated the change, then apply.
+
+### Cost guard
+
+If a query is cancelled for exceeding the scan cap, narrow the `dt` range rather
+than raising the cap. `hunting_bytes_scanned_cutoff` exists to stop accidents.

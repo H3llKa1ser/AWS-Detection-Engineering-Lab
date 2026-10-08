@@ -24,6 +24,7 @@ architecture and infrastructure-as-code in one repo.
 | **Network telemetry** | VPC Flow Logs (custom v5 format) + Route 53 Resolver query logs → CloudWatch Logs, isolated lab VPC | Network and DNS visibility you own and can write detections against |
 | **DNS Firewall** | Route 53 Resolver DNS Firewall: AWS-managed threat lists, custom block/allow lists, and DNS Firewall Advanced (DGA, dictionary DGA, tunnelling) | Prevention: known-bad domains *and* never-seen-before DGA/tunnelling traffic get no answer; every verdict is logged |
 | **Detection-as-code** | 26 metric-filter alarms over CloudTrail, flow and DNS logs, plus 3 EventBridge-driven alarms for DNS Firewall Advanced | CIS monitoring controls + network/DNS/DNS Firewall detections, mapped to MITRE ATT&CK |
+| **Threat hunting** | Glue table over the CloudTrail bucket (partition projection), Athena workgroup, 14 saved hunts, hunter IAM policy | Retrospective search for what real-time rules can't express: baselines, sequences, cross-event joins |
 | **Alerting** | SNS topic + EventBridge rules | Single notification fabric for every signal source |
 | **Response (opt-in)** | EventBridge → Lambda | SOAR-lite: auto-revoke an offending security-group rule |
 | **Traffic generator (opt-in)** | Hardened t3.micro in the lab VPC | Produces DNS telemetry so the DNS detections (and a real GuardDuty finding) fire |
@@ -56,6 +57,7 @@ flowchart LR
     CWL -->|metric filters| ALM[26 Metric-filter Alarms]
     EB -->|MatchedEvents alarms| SNS
     CT -->|audit log| S3[(S3 log bucket<br/>+ KMS)]
+    S3 -->|read in place| ATH[Athena + Glue<br/>14 saved hunts]
 
     CFG --> SH
     GD --> EB{EventBridge}
@@ -203,6 +205,61 @@ is then read through the provider and checked to really be that AWS-managed list
 before any rule uses it. Without the AWS CLI (e.g. in CI), pass the IDs in
 `dns_firewall_managed_list_ids`.
 
+## Threat hunting with Athena
+
+Detections answer "did this just happen?". Hunting answers "has this *ever*
+happened, and what else did that identity do?", over the full CloudTrail history
+in S3 rather than the CloudWatch stream. The `threat-hunting` module adds:
+
+- **A Glue table over the CloudTrail bucket**, read in place: no copies, no
+  crawler, no `ALTER TABLE ADD PARTITION`. It uses AWS's JsonSerDe definition
+  (the legacy CloudTrail SerDe misses newer fields) with **partition projection**
+  on region and day, so today's logs are queryable as soon as they land, and a
+  hunt filtered to 30 days reads 30 days.
+- **An Athena workgroup** (engine v3) whose settings are enforced: results go
+  only to a dedicated bucket, encrypted with the lab CMK, expiring after 30 days,
+  and any single query is cancelled past a scan cap (default 10 GiB).
+- **14 saved queries** in that workgroup, each mapped to ATT&CK:
+
+| # | Hunt | What it finds | MITRE ATT&CK |
+|---|------|---------------|--------------|
+| 01 | Console sign-in from a new source IP | Identity signs in from an IP absent from its 30-day baseline | T1078.004 |
+| 02 | Password guessing then success | One IP: 5+ failed console sign-ins, then a success | T1110 / T1110.003 |
+| 03 | Permission probing | AccessDenied on 10+ distinct APIs in an hour (stolen key being tested) | T1580 / T1069.003 |
+| 04 | Enumeration burst | 30+ distinct List/Describe/Get APIs across 5+ services in an hour | T1580 / T1526 / T1087.004 |
+| 05 | IAM persistence | Keys or passwords made for *another* user, admin grants, trust changes, MFA removal | T1098.001 / T1136.003 / T1098.003 |
+| 06 | Sensor tampering | Calls that disable or weaken this lab's own CloudTrail, GuardDuty, Config, flow/DNS logging, DNS Firewall, alarms or routing | T1562.008 / T1562.001 |
+| 07 | New-region activity | Writes in a region with no writes in the baseline | T1535 |
+| 08 | Data shared out | Snapshots, AMIs, buckets opened to foreign accounts or the public | T1537 |
+| 09 | Compute hijacking | GPU/accelerator, metal or 12xlarge+ launches, or 5+ at once (failures included) | T1496 |
+| 10 | Secret harvesting | 5+ distinct secrets or decrypted parameters read by one identity in a day | T1555.006 |
+| 11 | Instance credentials replayed | One instance-role session used from several source IPs, with IMDS version | T1552.005 / T1078.004 |
+| 12 | Root activity | Everything root did, with MFA status | T1078.004 |
+| 13 | New role-assumption path | Caller-to-role pairs never seen before, cross-account flagged | T1078.004 / T1550.001 |
+| 14 | Investigate an access key | Full ordered timeline for one key (pivot, not a hunt) | - |
+
+- **A hunter IAM policy** (`hunter_policy_arn` output) to attach to the people
+  who hunt: run queries in this workgroup, read the catalog, **read-only** on
+  the CloudTrail prefix (hunting can never alter evidence), and use the lab key.
+
+**The hunts are tested.** `tests/hunts/test_hunts.py` renders each query the way
+Terraform does, transpiles it to DuckDB and runs it against synthetic CloudTrail
+with a planted attack and benign look-alikes, asserting it finds the attack and
+nothing else. The table schema is parsed from the module, so the tests break if
+the table and queries drift apart. No AWS account needed:
+
+```bash
+pip install -r tests/hunts/requirements.txt
+python3 tests/hunts/test_hunts.py
+```
+
+To run a hunt: open Athena, switch to the `<prefix>-threat-hunting` workgroup,
+**Saved queries**, pick one, run. Or from the CLI:
+
+```bash
+aws athena list-named-queries --work-group detlab-threat-hunting
+```
+
 ## Prerequisites
 
 - Terraform >= 1.5, with the `hashicorp/aws` provider 6.x (DNS Firewall Advanced rules need it; see the CHANGELOG for upgrading from 5.x)
@@ -245,6 +302,9 @@ aws ec2 create-security-group --group-name detlab-test --description test
 #    the managed lists). It also sends DGA- and tunnelling-shaped traffic for the
 #    Advanced rules; that part is best effort, see docs/validation.md
 terraform apply -var deploy_traffic_generator=true
+
+# 4. Prove the threat-hunting queries work, offline, no AWS needed
+pip install -r tests/hunts/requirements.txt && python3 tests/hunts/test_hunts.py
 ```
 
 For adversary emulation that produces *real* (not sample) findings, point
@@ -263,7 +323,10 @@ itself is free (no NAT gateway); the opt-in traffic generator is one t3.micro.
 DNS Firewall bills on queries inspected and on domains held in your own lists;
 the AWS-managed lists carry no charge of their own. DNS Firewall Advanced is
 priced separately per query inspected; check the Route 53 pricing page before
-enabling it on a busy VPC. Expect **single-digit
+enabling it on a busy VPC. Athena bills per byte scanned: every saved hunt filters on the
+day partition, and the workgroup cancels any query past
+`hunting_bytes_scanned_cutoff` (10 GiB by default), so a mistaken unfiltered
+query cannot run up a bill. Idle, the hunting layer costs nothing. Expect **single-digit
 to low-tens of USD/month** idle; more if you generate heavy activity. Destroy
 when you are done.
 
@@ -292,8 +355,10 @@ removes them even with objects inside. (Remove that in any real deployment.)
 │   ├── dns-firewall/      # DNS Firewall rule group, managed + custom lists
 │   ├── detections/        # detection-as-code catalogue (metric filters)
 │   ├── alerting/          # SNS + EventBridge routing
+│   ├── threat-hunting/    # Glue table over CloudTrail, Athena workgroup, saved hunts (queries/*.sql)
 │   ├── response/          # opt-in Lambda auto-response
 │   └── traffic-generator/ # opt-in DNS traffic generator instance
+├── tests/hunts/           # behavioural tests for the hunt queries (DuckDB, no AWS)
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
 ```
@@ -303,7 +368,9 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] VPC Flow Logs + Route 53 Resolver query logging modules, with network and DNS detections
 - [x] Route 53 Resolver DNS Firewall with managed threat domain lists (block, not just detect)
 - [x] DNS Firewall Advanced (native DGA, dictionary-DGA and DNS-tunnelling rules), via `hashicorp/aws` 6.x
-- [ ] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries
+- [x] Athena + Glue table over the CloudTrail S3 bucket for threat-hunting queries (14 tested hunts)
+- [ ] Scheduled hunts: run selected saved queries daily and alert on non-empty results
+- [ ] VPC Flow Logs and Resolver query logs to S3 (Parquet) with Athena tables, extending hunting beyond CloudTrail
 - [ ] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path
 - [ ] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation)
 - [ ] Terratest coverage in CI (GitHub Actions)

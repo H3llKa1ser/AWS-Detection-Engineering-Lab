@@ -239,3 +239,55 @@ variable "dns_firewall_advanced_alarm_threshold" {
   type        = number
   default     = 1
 }
+
+# --- Threat hunting (Athena) ---------------------------------------------------
+
+variable "enable_threat_hunting" {
+  description = "Deploy the Glue table over CloudTrail, the Athena hunting workgroup, saved hunts and the hunter IAM policy."
+  type        = bool
+  default     = true
+}
+
+variable "hunting_projection_start" {
+  description = "Earliest day (yyyy/MM/dd) the CloudTrail table's partition projection considers."
+  type        = string
+  default     = "2025/01/01"
+
+  validation {
+    condition     = can(regex("^[0-9]{4}/[0-9]{2}/[0-9]{2}$", var.hunting_projection_start))
+    error_message = "hunting_projection_start must be yyyy/MM/dd."
+  }
+}
+
+variable "hunting_lookback_days" {
+  description = "Hunting window baked into the saved queries (days). Bigger windows scan more data."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.hunting_lookback_days >= 2 && var.hunting_lookback_days <= 365
+    error_message = "hunting_lookback_days must be between 2 and 365."
+  }
+}
+
+variable "hunting_recent_days" {
+  description = "'Recent' window for baseline-vs-recent hunts; the rest of the lookback is the baseline."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.hunting_recent_days >= 1
+    error_message = "hunting_recent_days must be at least 1."
+  }
+}
+
+variable "hunting_bytes_scanned_cutoff" {
+  description = "Per-query scan cap enforced by the workgroup, in bytes (minimum 10 MB). Default 10 GiB."
+  type        = number
+  default     = 10737418240
+
+  validation {
+    condition     = var.hunting_bytes_scanned_cutoff >= 10485760
+    error_message = "Athena's minimum per-query cutoff is 10 MB (10485760 bytes)."
+  }
+}
