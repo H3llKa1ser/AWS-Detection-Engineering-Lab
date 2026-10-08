@@ -1,0 +1,64 @@
+name: live-janitor
+
+# Destroys what crashed or cancelled e2e runs left in the sandbox: every
+# e2e/<prefix>/terraform.tfstate older than 6 hours (a clean run deletes its
+# state), then test activity outside Terraform (alert queues, target users).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: aws-sandbox
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    environment: sandbox
+    timeout-minutes: 150
+    env:
+      AWS_REGION: ${{ vars.AWS_SANDBOX_REGION }}
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tests/live/requirements.txt
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SANDBOX_REGION }}
+          role-duration-seconds: 10800
+      - name: Destroy stale e2e stacks
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > backend_override.tf
+          status=0
+          for prefix in $(python3 tests/live/janitor.py stale-states --bucket "${{ vars.AWS_SANDBOX_STATE_BUCKET }}"); do
+            echo "::group::${prefix}"
+            terraform init -reconfigure \
+              -backend-config="bucket=${{ vars.AWS_SANDBOX_STATE_BUCKET }}" \
+              -backend-config="key=e2e/${prefix}/terraform.tfstate" \
+              -backend-config="region=${AWS_REGION}" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+            if terraform destroy -auto-approve -var-file=ci/e2e.tfvars -var="name_prefix=${prefix}"; then
+              aws s3 rm "s3://${{ vars.AWS_SANDBOX_STATE_BUCKET }}/e2e/${prefix}/" --recursive
+            else
+              echo "::error::could not destroy ${prefix}; state kept for the next run"; status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+      - name: Sweep test activity outside Terraform
+        if: always()
+        run: python3 tests/live/janitor.py sweep
