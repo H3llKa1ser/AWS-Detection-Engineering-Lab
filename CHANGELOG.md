@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.14.0: Terratest
+
+### Added
+- `test/`: a Go suite on Terratest v1.0.1 with fixtures for the logging,
+  detections, alerting and Sigma log-alarm modules; one `offline` switch per
+  fixture plans without AWS or applies for real.
+  - Unit tier (`TestUnit*`, every push, job `terratest-unit`): offline plans with
+    assertions on the planned resources. Eight planted mistakes in the modules
+    (versioning, log validation, key rotation, public access, alarm period and
+    missing-data handling, a dropped Security Hub severity, a GuardDuty
+    threshold off by one) are all caught.
+  - Integration tier (`TestIntegration*`, `live.yml` job `terratest`, opt-in via
+    `TERRATEST_LIVE=1`): applies modules in the sandbox and asserts with the AWS
+    SDK, including that written events drive a CIS alarm, a Sigma metric alarm
+    and a Sigma Logs Insights log alarm to `ALARM`.
+- The janitor destroys Terratest fixtures whose remote state outlived their run.
+- Output `cloudtrail_name` on the logging module.
+
+### Changed
+- `live.yml` tier choices are now `all`, `conformance`, `e2e` and `terratest`.
+- The workflow safety tests also cover the Terratest jobs: Go's timeout below the
+  job's, remote state, and no way for the push-triggered unit job to run
+  integration tests.
+
+### Fixed (before release)
+- Parallel tests each ran `terraform init` against one shared plugin cache
+  (`TF_PLUGIN_CACHE_DIR`, set in CI), which Terraform does not guarantee to be
+  safe for concurrent use; one run failed with a provider checksum mismatch.
+  `terraform init` is now serialized (`initSerially`), while plans and applies
+  stay parallel. Five consecutive runs on a cold cache passed.
+
+### Notes
+- The Sigma log-alarm module is integration-only: the `hashicorp/awscc` provider
+  validates credentials with STS whenever it is configured, with no option to
+  skip, so it cannot be planned offline.
+- The integration tier has not yet been run against AWS by the author.
+
 ## 0.13.0: Multi-account delegated administrator
 
 ### Added

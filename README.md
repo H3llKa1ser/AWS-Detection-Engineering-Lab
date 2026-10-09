@@ -507,6 +507,13 @@ GitHub environment:
   through SNS, hunts find the triggered activity in S3, and the Sigma hunts match
   the reference implementation on synthetic CloudTrail files.
 
+- **Terratest** (Go, `test/`): a unit tier that plans module fixtures offline on
+  every push, and an integration tier that applies single modules in the sandbox
+  and asserts against the real resources, for example that an event written to
+  the log group drives its metric alarm and its Logs Insights log alarm to
+  `ALARM`. It is faster and more precise than the full end-to-end run when
+  something breaks. See [test/README.md](test/README.md).
+
 Credentials come from GitHub OIDC (no stored keys) for a role with guardrail
 denies; every run uses its own prefix and state, destroys in an `always()` step,
 and a daily janitor removes anything a crashed run left. Setup, safety design
@@ -648,6 +655,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 ├── ci/                    # bootstrap/ (sandbox OIDC role, state, budget), e2e.tfvars, render-catalogue/
 ├── org/                   # multi-account roots: management/ (delegation), security-admin/ (org-wide config)
 ├── tests/live/            # live conformance and end-to-end harness, janitor, offline tests of the harness
+├── test/                  # Terratest (Go): unit tier (offline plans) and module integration tier, fixtures/
 ├── intel/                 # curated threat indicators (CSV) and the curation rules
 ├── docs/                  # architecture, runbook, validation
 └── scripts/               # finding generators
@@ -667,7 +675,7 @@ removes them even with objects inside. (Remove that in any real deployment.)
 - [x] Run the offline test suites against a live sandbox account in CI (conformance against real CloudWatch and Athena; apply, trigger, assert alarms and hunt results, destroy)
 - [x] Sigma-rule → CloudWatch Logs Insights conversion for a second detection path (log alarms with Sigma's exact semantics, saved queries)
 - [x] Multi-account delegated-admin pattern (GuardDuty/Security Hub organisation): every region, Security Hub central configuration, plan-tested
-- [ ] Terratest coverage in CI (GitHub Actions)
+- [x] Terratest coverage in CI (GitHub Actions): offline unit tier on every push, module integration tier in the sandbox
 
 ## Notes & disclaimer
 
