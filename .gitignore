@@ -33,3 +33,5 @@ e2e-report.*
 conformance-report.*
 catalogue-plan.json
 ci/render-catalogue/plan.bin
+test/terratest.log
+test/fixtures/*/backend_override.tf
