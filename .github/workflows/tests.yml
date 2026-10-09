@@ -52,6 +52,11 @@ jobs:
           pip install -r tests/live/requirements.txt
           python3 tests/live/test_harness_offline.py
 
+      - name: Multi-account roots (offline plans) and the verification script
+        run: |
+          python3 tests/org/test_org_plans.py
+          python3 tests/org/test_verify_org.py
+
       - name: State machine definition is valid ASL
         run: |
           python3 -c "import json,sys; sys.path.insert(0,'tests/scheduled'); import test_state_machine as t; print(json.dumps(t.render()))" > /tmp/hunts.asl.json
@@ -66,3 +71,33 @@ jobs:
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false -input=false
       - run: terraform validate
+      - name: Validate the other roots
+        run: |
+          for d in ci/bootstrap ci/render-catalogue org/management org/security-admin; do
+            terraform -chdir="$d" init -backend=false -input=false && terraform -chdir="$d" validate
+          done
+
+  terratest-unit:
+    # Terratest unit tier: plans module fixtures offline (faked credentials, no
+    # AWS calls) and asserts on the planned resources. Integration tests in the
+    # same suite skip themselves without TERRATEST_LIVE=1.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/go.mod
+          cache-dependency-path: test/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false   # the wrapper script breaks Terratest's parsing of terraform output
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+      - name: go vet
+        working-directory: test
+        run: go vet ./...
+      - name: Terratest unit tier
+        working-directory: test
+        run: go test ./... -count=1 -timeout 25m -v
