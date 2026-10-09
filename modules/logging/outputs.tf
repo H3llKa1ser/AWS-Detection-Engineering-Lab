@@ -13,3 +13,7 @@ output "cloudwatch_log_group_name" {
 output "kms_key_arn" {
   value = var.kms_encrypt_logs ? aws_kms_key.logs[0].arn : null
 }
+
+output "cloudtrail_name" {
+  value = aws_cloudtrail.main.name
+}
