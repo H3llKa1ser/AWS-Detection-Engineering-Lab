@@ -10,8 +10,8 @@ on:
       tier:
         description: Which live tier to run
         type: choice
-        options: [both, conformance, e2e]
-        default: both
+        options: [all, conformance, e2e, terratest]
+        default: all
   schedule:
     - cron: "0 5 * * 1"   # Mondays 05:00 UTC
 
@@ -32,7 +32,7 @@ jobs:
 
   conformance:
     needs: offline
-    if: github.event_name == 'schedule' || inputs.tier != 'e2e'
+    if: github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'conformance'
     runs-on: ubuntu-latest
     environment: sandbox
     timeout-minutes: 30
@@ -72,7 +72,7 @@ jobs:
     if: >-
       always() && needs.offline.result == 'success' &&
       (needs.conformance.result == 'success' || needs.conformance.result == 'skipped') &&
-      (github.event_name == 'schedule' || inputs.tier != 'conformance')
+      (github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'e2e')
     runs-on: ubuntu-latest
     environment: sandbox
     timeout-minutes: 170
@@ -140,3 +140,43 @@ jobs:
         with:
           name: e2e-report
           path: e2e-report.*
+
+  terratest:
+    # Terratest integration tier: applies module fixtures in the sandbox, asserts
+    # against the real resources, destroys. Go's timeout is kept below the job's;
+    # a Go timeout skips deferred cleanup, so state is in S3 for the janitor.
+    needs: offline
+    if: github.event_name == 'schedule' || inputs.tier == 'all' || inputs.tier == 'terratest'
+    runs-on: ubuntu-latest
+    environment: sandbox
+    timeout-minutes: 120
+    env:
+      TERRATEST_LIVE: "1"
+      TERRATEST_STATE_BUCKET: ${{ vars.AWS_SANDBOX_STATE_BUCKET }}
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/go.mod
+          cache-dependency-path: test/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5     # S3 native state locking (use_lockfile)
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_SANDBOX_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SANDBOX_REGION }}
+          role-duration-seconds: 10800
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+      - name: Terratest integration tier
+        working-directory: test
+        run: |
+          set -o pipefail
+          go test ./... -run '^TestIntegration' -count=1 -timeout 100m -parallel 3 -v 2>&1 | tee terratest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terratest-log
+          path: test/terratest.log
