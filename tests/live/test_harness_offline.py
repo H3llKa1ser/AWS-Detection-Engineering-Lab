@@ -384,6 +384,11 @@ def test_janitor_selects_only_stale_e2e_states():
             {"Key": "bootstrap/terraform.tfstate", "LastModified": now - timedelta(days=30)},        # not e2e
             {"Key": "e2e/prod/terraform.tfstate", "LastModified": now - timedelta(days=30)}]          # not a run prefix
     assert janitor.stale_prefixes(objs, now - timedelta(hours=6)) == ["e2e-123-1"]
+    tt = [{"Key": "terratest/sigma-insights/tt-123-1-sig/terraform.tfstate", "LastModified": now - timedelta(hours=8)},
+          {"Key": "terratest/logging/tt-124-1-log/terraform.tfstate", "LastModified": now - timedelta(hours=1)},
+          {"Key": "terratest/../tt-1-1-x/terraform.tfstate", "LastModified": now - timedelta(days=2)},     # not a fixture
+          {"Key": "terratest/logging/prod/terraform.tfstate", "LastModified": now - timedelta(days=2)}]
+    assert janitor.stale_terratest(tt, now - timedelta(hours=6)) == ["sigma-insights tt-123-1-sig"]
 
 
 # --- Workflow safety invariants ------------------------------------------------------------------------------
@@ -403,8 +408,17 @@ def test_live_workflows_keep_their_safety_properties():
         assert "pull_request" not in wf["on"] and "push" not in wf["on"], "never on untrusted triggers"
     jobs = live["jobs"]
     assert jobs["conformance"]["needs"] == "offline" and "offline" in jobs["e2e"]["needs"]
-    for name in ("conformance", "e2e"):
+    assert jobs["terratest"]["needs"] == "offline"
+    for name in ("conformance", "e2e", "terratest"):
         assert jobs[name]["environment"] == "sandbox" and jobs[name]["timeout-minutes"] <= 180
+    tt = jobs["terratest"]
+    go_step = next(s for s in tt["steps"] if s.get("name") == "Terratest integration tier")
+    go_timeout = int(go_step["run"].split("-timeout ")[1].split("m")[0])
+    assert go_timeout + 15 <= tt["timeout-minutes"], "Go must time out (and fail cleanly) before the job is killed"
+    assert tt["env"]["TERRATEST_STATE_BUCKET"], "integration state must be remote, for the janitor"
+    assert all("aws-access-key-id" not in json.dumps(s) for s in tt["steps"])
+    assert "terratest-unit" in tests["jobs"] and "TERRATEST_LIVE" not in json.dumps(tests["jobs"]["terratest-unit"]), \
+        "the unit tier must never be able to run integration tests"
     steps = {s.get("id") or s.get("name"): s for s in jobs["e2e"]["steps"]}
     destroy = steps["destroy"]
     assert destroy["if"].startswith("always()") and "terraform destroy" in destroy["run"]

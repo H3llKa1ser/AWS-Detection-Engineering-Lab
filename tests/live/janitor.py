@@ -6,6 +6,9 @@ Sandbox janitor: finds what crashed or cancelled e2e runs left behind.
                  still in the state bucket after --older-than-hours (a run
                  that finished cleanly deletes its state); the workflow then
                  runs `terraform destroy` for each and deletes the state.
+  stale-terratest  print "fixture prefix" for Terratest integration stacks
+                 whose state outlived its run (a clean test deletes it); the
+                 workflow destroys each from test/fixtures/<fixture>.
   sweep          delete test activity that lives outside Terraform state:
                  e2e alert queues, e2e target IAM users and conformance log
                  groups older than the threshold.
@@ -21,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 
 STATE_KEY = re.compile(r"^e2e/(e2e-[0-9]+-[0-9]+)/terraform\.tfstate$")
+TERRATEST_KEY = re.compile(r"^terratest/([a-z][a-z-]*)/(tt-[0-9a-z]+-[0-9]+-[a-z]+)/terraform\.tfstate$")
 PREFIX = re.compile(r"^e2e-[0-9]+-[0-9]+$")
 
 
@@ -32,6 +36,23 @@ def stale_prefixes(objects, cutoff):
         if m and obj["LastModified"] < cutoff:
             out.append(m.group(1))
     return sorted(set(out))
+
+
+def stale_terratest(objects, cutoff):
+    """objects -> sorted 'fixture prefix' pairs for Terratest states older than cutoff."""
+    out = set()
+    for obj in objects:
+        m = TERRATEST_KEY.match(obj["Key"])
+        if m and obj["LastModified"] < cutoff:
+            out.add(f"{m.group(1)} {m.group(2)}")
+    return sorted(out)
+
+
+def list_objects(s3, bucket, prefix):
+    objects = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        objects += page.get("Contents", [])
+    return objects
 
 
 def stale_states(s3, bucket, cutoff):
@@ -78,17 +99,20 @@ def sweep(session, cutoff, dry_run=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["stale-states", "sweep"])
+    ap.add_argument("mode", choices=["stale-states", "stale-terratest", "sweep"])
     ap.add_argument("--bucket")
     ap.add_argument("--older-than-hours", type=float, default=6)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=args.older_than_hours)
     session = boto3.Session()
-    if args.mode == "stale-states":
+    if args.mode in ("stale-states", "stale-terratest"):
         if not args.bucket:
             sys.exit("--bucket is required")
-        print("\n".join(stale_states(session.client("s3"), args.bucket, cutoff)))
+        if args.mode == "stale-states":
+            print("\n".join(stale_states(session.client("s3"), args.bucket, cutoff)))
+        else:
+            print("\n".join(stale_terratest(list_objects(session.client("s3"), args.bucket, "terratest/"), cutoff)))
     else:
         for r in sweep(session, cutoff, args.dry_run):
             print(("would remove " if args.dry_run else "removed ") + r)
