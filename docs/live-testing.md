@@ -16,6 +16,7 @@ on demand and weekly, behind an approval-gated environment.
 | Tier | Deploys? | Time | What it proves |
 |------|----------|------|----------------|
 | **Conformance** | no | minutes | Real CloudWatch `TestMetricFilter` agrees with expected matches for all 26 built-in patterns and with the CloudWatch model for every Sigma pattern (case-flipped events included); real Logs Insights agrees with the model for every Sigma query, and probe events settle how JSON booleans and nulls behave; real Athena computes the IP keys and CIDR ranges exactly as Python's `ipaddress` does |
+| **Terratest integration** (`test/`) | single modules (unique prefixes) | ~20-30 minutes | Module by module, against the real resources: the CloudTrail bucket's controls and a logging trail; events written straight into a log group drive a CIS and a Sigma metric alarm, and a Sigma Logs Insights log alarm, to `ALARM`. Narrower than end to end, but it localises a failure to one module and skips CloudTrail delivery delays |
 | **End to end** | yes (unique prefix) | ~1-2 hours | Every saved query executes in real Athena; the retro-hunt fired by the indicator upload completes; a scheduled run succeeds with no FAILED hunts; safe triggers raise their alarms via SNS; hunts find the triggered activity once CloudTrail and Firehose deliver to S3; the Sigma hunts return exactly the reference result on synthetic CloudTrail files |
 
 Both start only after the full offline suite passes.
@@ -67,8 +68,9 @@ behavioural and not asserted.
 - **Always clean up.** The destroy step runs whatever happened before it (if
   init succeeded), retries once, and only then deletes the run's state. A failed
   destroy keeps the state, and the daily janitor (`live-janitor.yml`) destroys
-  any stack whose state is older than 6 hours, then sweeps test activity outside
-  Terraform (alert queues, target users).
+  any stack whose state is older than 6 hours (end-to-end runs and Terratest
+  fixtures alike), then sweeps test activity outside Terraform (alert queues,
+  target users, conformance log groups).
 - **Cost.** Job timeouts, a 1 GiB scan cap on the conformance workgroup,
   1-day retention in `ci/e2e.tfvars`, and a monthly budget alert from the
   bootstrap. A run's cost is dominated by a t3.micro for its duration, CloudTrail
